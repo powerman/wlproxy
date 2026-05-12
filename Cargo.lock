@@ -299,6 +299,7 @@ name = "filterway"
 version = "0.1.0"
 dependencies = [
  "aargvark",
+ "anyhow",
  "defer",
  "libc",
  "rustix 0.38.44",
