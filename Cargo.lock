@@ -301,7 +301,7 @@ dependencies = [
  "aargvark",
  "defer",
  "libc",
- "rustix 0.38.44",
+ "rustix 1.1.4",
  "sd-notify",
  "tempfile",
  "uds",
