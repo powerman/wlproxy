@@ -110,14 +110,9 @@ fn large_packet_over_unix_stream() {
 // ---------------------------------------------------------------------------
 
 fn filterway_binary() -> PathBuf {
-    if let Ok(path) = std::env::var("CARGO_BIN_EXE_filterway") {
-        return PathBuf::from(path);
-    }
-    let p = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("target/debug/filterway");
-    if p.exists() {
-        return p;
-    }
-    panic!("filterway binary not found — run `cargo build` first");
+    std::env::var("CARGO_BIN_EXE_filterway")
+        .map(PathBuf::from)
+        .expect("filterway binary not found — run `cargo test` (CARGO_BIN_EXE_filterway is always set by cargo test)")
 }
 
 fn connect_with_retry(path: &std::path::Path, timeout: Duration) -> UnixStream {
