@@ -5,6 +5,10 @@ lockfile = true # DO NOT FORGET TO `touch mise.lock` if mise.lock does not exist
 [tools]
 rust = '1.95.0'
 
+#--- Format
+# Opinionated Code Formatter.
+prettier = "latest"
+
 #--- Lint
 # Static checker for GitHub Actions workflow files.
 actionlint = 'latest'
@@ -40,7 +44,7 @@ depends = ['test:*']
 
 [tasks.default]
 description = 'Run all linters and tests'
-depends = ['lint', 'test']
+depends = ['fmt', 'lint', 'test']
 
 [tasks.ci]
 description = 'Run all CI tasks'
@@ -53,6 +57,10 @@ run_windows = 'powershell -c "$status = git status --porcelain; if ($status) { $
 description = 'Build release binary'
 run = 'cargo build --release'
 
+[tasks.'fmt:markdown']
+description = 'Format markdown files'
+run = 'prettier --write "**/*.md"'
+
 [tasks.'fmt:rust']
 description = 'Format Rust code'
 run = 'cargo fmt --all'
@@ -60,6 +68,10 @@ run = 'cargo fmt --all'
 [tasks.'lint:workflows']
 description = 'Lint GitHub Action workflows'
 run = 'actionlint'
+
+[tasks.'lint:markdown']
+description = 'Lint markdown files'
+run = 'prettier --check "**/*.md"'
 
 [tasks.'lint:rust']
 description = 'Lint Rust code with clippy'

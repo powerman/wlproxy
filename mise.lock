@@ -20,6 +20,10 @@ backend = "aqua:cli/cli"
 version = "2.13.1"
 backend = "aqua:orhun/git-cliff"
 
+[[tools.prettier]]
+version = "3.8.3"
+backend = "npm:prettier"
+
 [[tools.rust]]
 version = "1.95.0"
 backend = "core:rust"
