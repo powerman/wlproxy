@@ -22,6 +22,7 @@ use {
 };
 
 use filterway::proto::{self, read_arg_string};
+use filterway::ObjType;
 
 #[derive(Aargvark, Clone)]
 struct Args {
@@ -153,15 +154,6 @@ fn main() {
                 .context("Error accepting downstream connection")?;
             let upstream = UnixStream::connect(&args.upstream)
                 .context("Error creating upstream connection")?;
-
-            #[derive(Clone, Copy, Debug)]
-            enum ObjType {
-                Display,
-                Registry,
-                XdgWmBase { ver: u32 },
-                XdgSurface { ver: u32 },
-                XdgToplevel { ver: u32 },
-            }
 
             let objects = Arc::new(Mutex::new(HashMap::new()));
             objects.lock().unwrap().insert(1, ObjType::Display);
