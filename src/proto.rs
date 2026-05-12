@@ -12,7 +12,7 @@ pub struct Packet {
 }
 
 // header word1 + word2
-const BODY_SIZE_ADJ: i64 = 8;
+const BODY_SIZE_ADJ: u16 = 8;
 
 pub fn read_packet(serial: &mut impl std::io::Read) -> Result<Option<Packet>, &'static str> {
     let header_word1 = match read(serial, 4) {
@@ -35,7 +35,7 @@ pub fn read_packet(serial: &mut impl std::io::Read) -> Result<Option<Packet>, &'
     let header_word2 = read(serial, 4).map_err(|_| "header word 2")?;
     let message_size =
         u16::from_ne_bytes(header_word2[2usize..2usize + 2usize].try_into().unwrap());
-    let body = read(serial, (message_size as i64 - BODY_SIZE_ADJ) as usize).map_err(|_| "body")?;
+    let body = read(serial, (message_size - BODY_SIZE_ADJ) as usize).map_err(|_| "body")?;
     let opcode = u16::from_ne_bytes(header_word2[0usize..2usize].try_into().unwrap());
     let id = u32::from_ne_bytes(header_word1[0usize..4usize].try_into().unwrap());
     Ok(Some(Packet { id, opcode, body }))
@@ -43,7 +43,7 @@ pub fn read_packet(serial: &mut impl std::io::Read) -> Result<Option<Packet>, &'
 
 pub fn write_packet(serial: &mut impl std::io::Write, data: &Packet) -> Result<(), &'static str> {
     let mut header_word2 = vec![0; 4usize];
-    let message_size = (data.body.len() as i64 + BODY_SIZE_ADJ) as u16;
+    let message_size = (data.body.len() as u16).wrapping_add(BODY_SIZE_ADJ);
     header_word2[2usize..2usize + 2usize].copy_from_slice(&message_size.to_le_bytes());
     header_word2[0usize..2usize].copy_from_slice(&data.opcode.to_le_bytes());
     let mut header_word1 = vec![0; 4usize];
