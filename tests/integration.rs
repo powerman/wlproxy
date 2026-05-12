@@ -261,7 +261,7 @@ fn build_object_chain(
     {
         let mut body = vec![];
         proto::write_arg_uint(&mut body, 0).unwrap();
-        proto::write_arg_string(&mut body, "xdg_wm_base".to_string()).unwrap();
+        proto::write_arg_string(&mut body, "xdg_wm_base").unwrap();
         proto::write_arg_uint(&mut body, 1).unwrap();
         write_packet(compositor, &Packet { id: 2, opcode: 0, body }).unwrap();
     }
@@ -271,7 +271,7 @@ fn build_object_chain(
     {
         let mut body = vec![];
         proto::write_arg_uint(&mut body, 0).unwrap();
-        proto::write_arg_string(&mut body, "xdg_wm_base".to_string()).unwrap();
+        proto::write_arg_string(&mut body, "xdg_wm_base").unwrap();
         proto::write_arg_uint(&mut body, 1).unwrap();
         proto::write_arg_uint(&mut body, 3).unwrap();
         write_packet(client, &Packet { id: 2, opcode: 0, body }).unwrap();
@@ -321,7 +321,7 @@ fn filterway_object_chain_and_app_id_replacement() {
     // Client sends XdgToplevel.set_app_id (opcode=3, id 5) with original app_id "my-app".
     {
         let mut body = vec![];
-        proto::write_arg_string(&mut body, "my-app".to_string()).unwrap();
+        proto::write_arg_string(&mut body, "my-app").unwrap();
         write_packet(&mut client, &Packet { id: 5, opcode: 3, body }).unwrap();
     }
     let modified = read_packet(&mut compositor).unwrap().unwrap();
@@ -351,7 +351,7 @@ fn filterway_title_replacement() {
     // Client sends XdgToplevel.set_title (opcode=2, id 5) with original title "my-title".
     {
         let mut body = vec![];
-        proto::write_arg_string(&mut body, "my-title".to_string()).unwrap();
+        proto::write_arg_string(&mut body, "my-title").unwrap();
         write_packet(&mut client, &Packet { id: 5, opcode: 2, body }).unwrap();
     }
     let modified = read_packet(&mut compositor).unwrap().unwrap();
@@ -381,7 +381,7 @@ fn filterway_app_id_prefix() {
     // Client sends XdgToplevel.set_app_id (opcode=3) with original app_id "my-app".
     {
         let mut body = vec![];
-        proto::write_arg_string(&mut body, "my-app".to_string()).unwrap();
+        proto::write_arg_string(&mut body, "my-app").unwrap();
         write_packet(&mut client, &Packet { id: 5, opcode: 3, body }).unwrap();
     }
     let modified = read_packet(&mut compositor).unwrap().unwrap();
@@ -411,7 +411,7 @@ fn filterway_title_prefix() {
     // Client sends XdgToplevel.set_title (opcode=2) with original title "my-title".
     {
         let mut body = vec![];
-        proto::write_arg_string(&mut body, "my-title".to_string()).unwrap();
+        proto::write_arg_string(&mut body, "my-title").unwrap();
         write_packet(&mut client, &Packet { id: 5, opcode: 2, body }).unwrap();
     }
     let modified = read_packet(&mut compositor).unwrap().unwrap();

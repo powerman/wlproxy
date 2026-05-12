@@ -314,8 +314,7 @@ fn main() {
                                                                     &mut packet.body.as_slice(),
                                                                 ).context("Error reading app id message body")?;
                                                                 packet.body.clear();
-                                                                proto::write_arg_string(
-                                                                    &mut packet.body,
+                                                                let new_title =
                                                                     if args.prefix_title.is_some() {
                                                                         format!(
                                                                             "{}{}",
@@ -326,7 +325,10 @@ fn main() {
                                                                         )
                                                                     } else {
                                                                         title.clone()
-                                                                    },
+                                                                    };
+                                                                proto::write_arg_string(
+                                                                    &mut packet.body,
+                                                                    &new_title,
                                                                 )
                                                                 .unwrap();
                                                                 if args.debug.is_some() {
@@ -345,8 +347,7 @@ fn main() {
                                                                     &mut packet.body.as_slice(),
                                                                 ).context("Error reading app id message body")?;
                                                                 packet.body.clear();
-                                                                proto::write_arg_string(
-                                                                    &mut packet.body,
+                                                                let new_app_id =
                                                                     if args.prefix.is_some() {
                                                                         format!(
                                                                             "{}{}",
@@ -357,7 +358,10 @@ fn main() {
                                                                         )
                                                                     } else {
                                                                         app_id.clone()
-                                                                    },
+                                                                    };
+                                                                proto::write_arg_string(
+                                                                    &mut packet.body,
+                                                                    &new_app_id,
                                                                 )
                                                                 .unwrap();
                                                                 if args.debug.is_some() {

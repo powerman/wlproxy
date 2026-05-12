@@ -82,8 +82,8 @@ pub fn read_arg_string(serial: &mut impl std::io::Read) -> Result<Option<String>
     Ok(Some(String::from_utf8(body).map_err(|_| "bad utf-8")?))
 }
 
-pub fn write_arg_string(serial: &mut impl std::io::Write, data: String) -> Result<(), &str> {
-    let mut buf = data.into_bytes();
+pub fn write_arg_string(serial: &mut impl std::io::Write, data: &str) -> Result<(), &'static str> {
+    let mut buf = data.as_bytes().to_vec();
     buf.push(0);
     let null_term_len = buf.len();
     buf.resize(buf.len().next_multiple_of(4), 0u8);
@@ -334,7 +334,7 @@ mod tests {
         ];
         for (input, expected) in &cases {
             let mut buf = vec![];
-            write_arg_string(&mut buf, input.to_string()).unwrap();
+            write_arg_string(&mut buf, input).unwrap();
             let mut c = Cursor::new(&buf);
             let r = read_arg_string(&mut c).unwrap();
             assert_eq!(r.as_deref(), *expected, "failed for {input:?}");
@@ -345,7 +345,7 @@ mod tests {
     fn string_unicode() {
         let s = "Привет, мир!";
         let mut buf = vec![];
-        write_arg_string(&mut buf, s.to_string()).unwrap();
+        write_arg_string(&mut buf, s).unwrap();
         let mut c = Cursor::new(&buf);
         let r = read_arg_string(&mut c).unwrap();
         assert_eq!(r, Some(s.to_string()));
@@ -362,7 +362,7 @@ mod tests {
     #[test]
     fn string_wire_format_simple() {
         let mut buf = vec![];
-        write_arg_string(&mut buf, "hi".to_string()).unwrap();
+        write_arg_string(&mut buf, "hi").unwrap();
         assert_eq!(buf, vec![3, 0, 0, 0, b'h', b'i', 0, 0]);
     }
 
@@ -372,7 +372,7 @@ mod tests {
         for n in 0..=3 {
             let s = "x".repeat(n);
             let mut buf = vec![];
-            write_arg_string(&mut buf, s.clone()).unwrap();
+            write_arg_string(&mut buf, s.as_str()).unwrap();
             let expected_total = 4 + (n + 1).next_multiple_of(4);
             assert_eq!(buf.len(), expected_total, "wrong padded size for n={n}");
             let mut c = Cursor::new(&buf);
