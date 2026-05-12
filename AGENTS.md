@@ -5,64 +5,68 @@
 Wayland socket proxy that can do minor changes to messages for any programs
 that use its downstream socket.
 
-### Структура исходников
+### Source structure
 
-- **`src/main.rs`** — точка входа, парсинг аргументов, создание и слушание downstream-сокета,
-  принятие соединений.
-- **`src/proto.rs`** — чтение/запись Wayland-сообщений (8-байтовый заголовок + тело).
-- **`build.rs`** — удалён; передача FD через Unix sockets теперь
-  осуществляется через крейт `uds` на стабильном Rust.
+- **`src/main.rs`** — entry point, argument parsing, creating and listening on
+  the downstream socket, accepting connections.
+- **`src/lib.rs`** — public types (enum `ObjType` for tracking Wayland objects).
+- **`src/proto.rs`** — reading/writing Wayland messages (8-byte header + body).
+- **`tests/integration.rs`** — integration tests with a compositor emulator.
+- **`build.rs`** — removed; FD forwarding via Unix sockets is now done
+  through the `uds` crate on stable Rust.
 
-### Ключевые компоненты
+### Key components
 
-- **`Args`** — CLI-аргументы: `--upstream` (путь к сокету композитора),
-  `--downstream` (путь к новому сокету),
-  `--app-id` / `--title` (замена или префикс — через `--prefix` / `--prefix-title`),
+- **`Args`** — CLI arguments: `--upstream` (path to compositor socket),
+  `--downstream` (path to the new socket),
+  `--app-id` / `--title` (replace or prefix — via `--prefix` / `--prefix-title`),
   `--debug`.
-- **`Packet`** — Wayland-сообщение: `id` (объект), `opcode`, `body`.
-- **`AncillaryReader` / `AncillaryWriter`** — обёртки для чтения/записи Unix socket
-  ancillary data (передача FD), необходимы для Wayland-протокола.
-- File lock (`lock_path`) — предотвращает запуск второго экземпляра с тем же downstream-сокетом.
+- **`Packet`** — Wayland message: `id` (object), `opcode`, `body`.
+- **`AncillaryReader` / `AncillaryWriter`** — wrappers for reading/writing
+  Unix socket ancillary data (FD forwarding), required by the Wayland protocol.
+- File lock (`lock_path`) — prevents running a second instance with the same
+  downstream socket.
 
-### Поток данных
+### Data flow
 
-На каждое соединение создаются два потока:
+Each connection spawns two threads:
 
-1. **Client→Server** (downstream → upstream) — читает сообщения от клиента,
-   отслеживает создание объектов (Display → Registry → XdgWmBase → XdgSurface → XdgToplevel),
-   модифицирует `set_app_id` (opcode 3) и `set_title` (opcode 2)
-   если указаны соответствующие аргументы,
-   пересылает на upstream.
-2. **Server→Client** (upstream → downstream) — читает ответы от композитора,
-   обрабатывает `global` события для определения type_id интерфейса `xdg_wm_base`,
-   пересылает клиенту.
+1. **Client→Server** (downstream → upstream) — reads messages from the client,
+   tracks object creation
+   (Display → Registry → XdgWmBase → XdgSurface → XdgToplevel),
+   modifies `set_app_id` (opcode 3) and `set_title` (opcode 2)
+   if the corresponding arguments are set,
+   forwards to upstream.
+2. **Server→Client** (upstream → downstream) — reads responses from the compositor,
+   handles `global` events to determine the type_id of the `xdg_wm_base` interface,
+   forwards to the client.
 
-### Жизненный цикл
+### Lifecycle
 
-1. Создаёт downstream-сокет (с файловой блокировкой).
-2. Нотифицирует systemd о готовности (через `sd_notify`).
-3. В цикле принимает соединения от Wayland-клиентов.
-4. Для каждого соединения устанавливает upstream-соединение к композитору.
-5. Запускает два потока (client→server, server→client).
-6. При обрыве любого соединения shutdown обоих сокетов через defer.
+1. Creates the downstream socket (with a file lock).
+2. Notifies systemd about readiness (via `sd_notify`).
+3. Accepts connections from Wayland clients in a loop.
+4. For each connection, establishes an upstream connection to the compositor.
+5. Spawns two threads (client→server, server→client).
+6. On either connection breaking, shutdowns both sockets via defer.
 
-### Диаграмма объектов (отслеживание)
+### Object tracking diagram
 
 ```text
 Display (id=1) → get_registry (opcode=1) → Registry → bind (opcode=0) →
   XdgWmBase → get_xdg_surface → XdgSurface → create_toplevel → XdgToplevel
 ```
 
-### Нюансы
+### Nuances
 
-- `sd_notify::booted()` — проверка, загружена ли система с systemd,
-  для уведомления о готовности.
-- `Object type_id` для `xdg_wm_base` определяется динамически из `global`-событий
-  в server→client-потоке.
-- Поддерживаются версии протокола xdg_wm_base 0–6.
-- Передача FD через Unix sockets (требуется Wayland-протоколом)
-  осуществляется через крейт `uds` (`UnixStreamExt::send_fds`/`recv_fds`),
-  доступный на стабильном Rust.
+- `sd_notify::booted()` — checks whether the system is booted with systemd,
+  for readiness notification.
+- `Object type_id` for `xdg_wm_base` is determined dynamically from `global`
+  events in the server→client thread.
+- Supports xdg_wm_base protocol versions 0–6.
+- FD forwarding via Unix sockets (required by the Wayland protocol)
+  is done through the `uds` crate (`UnixStreamExt::send_fds`/`recv_fds`),
+  available on stable Rust.
 
 ### Tasks
 
@@ -70,6 +74,11 @@ Use these commands for corresponding tasks:
 
 - `mise run fmt` — fixes formatting.
 - `mise run lint` — runs all linters.
+- `mise run test` — runs all tests.
+- `mise run build` — builds release binary.
+- `mise run ci` — runs full CI pipeline (fmt + lint + test + git dirty check).
+- `mise run cover:rust` — runs tests with LLVM coverage instrumentation.
+- `mise run cover:rust:total` — prints total coverage percentage.
 
 ---
 
