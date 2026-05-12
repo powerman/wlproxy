@@ -526,7 +526,15 @@ fn filterway_delete_id() {
     {
         let mut body = vec![];
         proto::write_arg_uint(&mut body, 5).unwrap();
-        write_packet(&mut compositor, &Packet { id: 1, opcode: 1, body }).unwrap();
+        write_packet(
+            &mut compositor,
+            &Packet {
+                id: 1,
+                opcode: 1,
+                body,
+            },
+        )
+        .unwrap();
     }
     // Client drains the forwarded delete_id (server→client thread removes obj 5 first).
     let _ = read_packet(&mut client).unwrap().unwrap();
@@ -536,7 +544,15 @@ fn filterway_delete_id() {
     {
         let mut body = vec![];
         proto::write_arg_string(&mut body, "my-app").unwrap();
-        write_packet(&mut client, &Packet { id: 5, opcode: 3, body }).unwrap();
+        write_packet(
+            &mut client,
+            &Packet {
+                id: 5,
+                opcode: 3,
+                body,
+            },
+        )
+        .unwrap();
     }
     let received = read_packet(&mut compositor).unwrap().unwrap();
     let mut cursor = std::io::Cursor::new(&received.body[..]);
@@ -569,7 +585,15 @@ fn filterway_global_filtering() {
     {
         let mut body = vec![];
         proto::write_arg_uint(&mut body, 2).unwrap();
-        write_packet(&mut client, &Packet { id: 1, opcode: 1, body }).unwrap();
+        write_packet(
+            &mut client,
+            &Packet {
+                id: 1,
+                opcode: 1,
+                body,
+            },
+        )
+        .unwrap();
     }
     let _ = read_packet(&mut compositor).unwrap().unwrap();
 
@@ -579,7 +603,15 @@ fn filterway_global_filtering() {
         proto::write_arg_uint(&mut body, 0).unwrap();
         proto::write_arg_string(&mut body, "wl_compositor").unwrap();
         proto::write_arg_uint(&mut body, 4).unwrap();
-        write_packet(&mut compositor, &Packet { id: 2, opcode: 0, body }).unwrap();
+        write_packet(
+            &mut compositor,
+            &Packet {
+                id: 2,
+                opcode: 0,
+                body,
+            },
+        )
+        .unwrap();
     }
     let _ = read_packet(&mut client).unwrap().unwrap();
 
@@ -589,7 +621,15 @@ fn filterway_global_filtering() {
         proto::write_arg_uint(&mut body, 1).unwrap();
         proto::write_arg_string(&mut body, "xdg_wm_base").unwrap();
         proto::write_arg_uint(&mut body, 6).unwrap();
-        write_packet(&mut compositor, &Packet { id: 2, opcode: 0, body }).unwrap();
+        write_packet(
+            &mut compositor,
+            &Packet {
+                id: 2,
+                opcode: 0,
+                body,
+            },
+        )
+        .unwrap();
     }
     let _ = read_packet(&mut client).unwrap().unwrap();
 
@@ -600,7 +640,15 @@ fn filterway_global_filtering() {
         proto::write_arg_string(&mut body, "wl_compositor").unwrap();
         proto::write_arg_uint(&mut body, 4).unwrap();
         proto::write_arg_uint(&mut body, 3).unwrap();
-        write_packet(&mut client, &Packet { id: 2, opcode: 0, body }).unwrap();
+        write_packet(
+            &mut client,
+            &Packet {
+                id: 2,
+                opcode: 0,
+                body,
+            },
+        )
+        .unwrap();
     }
     let _ = read_packet(&mut compositor).unwrap().unwrap();
 
@@ -611,7 +659,15 @@ fn filterway_global_filtering() {
         proto::write_arg_string(&mut body, "xdg_wm_base").unwrap();
         proto::write_arg_uint(&mut body, 6).unwrap();
         proto::write_arg_uint(&mut body, 4).unwrap();
-        write_packet(&mut client, &Packet { id: 2, opcode: 0, body }).unwrap();
+        write_packet(
+            &mut client,
+            &Packet {
+                id: 2,
+                opcode: 0,
+                body,
+            },
+        )
+        .unwrap();
     }
     let _ = read_packet(&mut compositor).unwrap().unwrap();
 
@@ -619,7 +675,15 @@ fn filterway_global_filtering() {
     {
         let mut body = vec![];
         proto::write_arg_uint(&mut body, 5).unwrap();
-        write_packet(&mut client, &Packet { id: 4, opcode: 2, body }).unwrap();
+        write_packet(
+            &mut client,
+            &Packet {
+                id: 4,
+                opcode: 2,
+                body,
+            },
+        )
+        .unwrap();
     }
     let _ = read_packet(&mut compositor).unwrap().unwrap();
 
@@ -627,7 +691,15 @@ fn filterway_global_filtering() {
     {
         let mut body = vec![];
         proto::write_arg_uint(&mut body, 6).unwrap();
-        write_packet(&mut client, &Packet { id: 5, opcode: 1, body }).unwrap();
+        write_packet(
+            &mut client,
+            &Packet {
+                id: 5,
+                opcode: 1,
+                body,
+            },
+        )
+        .unwrap();
     }
     let _ = read_packet(&mut compositor).unwrap().unwrap();
 
@@ -635,7 +707,15 @@ fn filterway_global_filtering() {
     {
         let mut body = vec![];
         proto::write_arg_string(&mut body, "my-app-3").unwrap();
-        write_packet(&mut client, &Packet { id: 3, opcode: 3, body }).unwrap();
+        write_packet(
+            &mut client,
+            &Packet {
+                id: 3,
+                opcode: 3,
+                body,
+            },
+        )
+        .unwrap();
     }
     {
         let received = read_packet(&mut compositor).unwrap().unwrap();
@@ -652,7 +732,15 @@ fn filterway_global_filtering() {
     {
         let mut body = vec![];
         proto::write_arg_string(&mut body, "some-app").unwrap();
-        write_packet(&mut client, &Packet { id: 6, opcode: 3, body }).unwrap();
+        write_packet(
+            &mut client,
+            &Packet {
+                id: 6,
+                opcode: 3,
+                body,
+            },
+        )
+        .unwrap();
     }
     {
         let received = read_packet(&mut compositor).unwrap().unwrap();
@@ -682,8 +770,7 @@ fn filterway_fd_forwarding_server_to_client() {
     let mock_listener =
         std::os::unix::net::UnixListener::bind(dir.path().join("upstream.sock")).unwrap();
 
-    let (filterway, compositor, mut client) =
-        spawn_filterway(&[], dir.path(), &mock_listener);
+    let (filterway, compositor, mut client) = spawn_filterway(&[], dir.path(), &mock_listener);
 
     // Create a dummy socket pair — one end's FD is sent through filterway.
     let (dummy_send, dummy_recv) = std::os::unix::net::UnixStream::pair().unwrap();
@@ -691,7 +778,15 @@ fn filterway_fd_forwarding_server_to_client() {
 
     // Build a minimal valid Wayland packet (empty body → 8 bytes total).
     let mut packet_bytes = vec![];
-    write_packet(&mut packet_bytes, &Packet { id: 1, opcode: 0, body: vec![] }).unwrap();
+    write_packet(
+        &mut packet_bytes,
+        &Packet {
+            id: 1,
+            opcode: 0,
+            body: vec![],
+        },
+    )
+    .unwrap();
     assert_eq!(packet_bytes.len(), 8);
 
     // Compositor sends the packet with an FD attached.
@@ -714,7 +809,14 @@ fn filterway_fd_forwarding_server_to_client() {
     // Parse and verify the packet content.
     let mut cursor = std::io::Cursor::new(&buf[..]);
     let received = read_packet(&mut cursor).unwrap().unwrap();
-    assert_eq!(received, Packet { id: 1, opcode: 0, body: vec![] });
+    assert_eq!(
+        received,
+        Packet {
+            id: 1,
+            opcode: 0,
+            body: vec![]
+        }
+    );
 
     // Close the received FD.
     drop(unsafe { OwnedFd::from_raw_fd(fd_buf[0]) });
