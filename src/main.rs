@@ -396,6 +396,9 @@ fn main() {
                             )
                             .context("Error writing message")?;
                             for fd in ancillary_accum.drain(..) {
+                                // Safety: FDs were received via SCM_RIGHTS ancillary data,
+                                // which transfers ownership to the receiver.  Re-wrapping
+                                // in OwnedFd ensures they are closed on drop.
                                 drop(unsafe { OwnedFd::from_raw_fd(fd) });
                             }
                             for m in send_extra.drain(..) {
@@ -498,6 +501,9 @@ fn main() {
                             )
                             .context("Error writing message")?;
                             for fd in ancillary_accum.drain(..) {
+                                // Safety: FDs were received via SCM_RIGHTS ancillary data,
+                                // which transfers ownership to the receiver.  Re-wrapping
+                                // in OwnedFd ensures they are closed on drop.
                                 drop(unsafe { OwnedFd::from_raw_fd(fd) });
                             }
                         }

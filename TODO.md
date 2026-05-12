@@ -10,9 +10,9 @@
 
 ## Фаза 2: Код — простые исправления
 
-- [ ] **2.1** `body: std::vec::Vec<u8>` → `body: Vec<u8>` в `Packet`
-- [ ] **2.2** `BODY_SIZE_ADJ` сменить тип с `i64` на `u16`
-- [ ] **2.3** `write_arg_string(data: String)` → `data: &str` + обновить callers
+- [x] **2.1** `body: std::vec::Vec<u8>` → `body: Vec<u8>` в `Packet`
+- [x] **2.2** `BODY_SIZE_ADJ` сменить тип с `i64` на `u16`
+- [x] **2.3** `write_arg_string(data: String)` → `data: &str` + обновить callers
 - [ ] **2.4** Добавить `// Safety:` комментарии для `unsafe` блоков
 - [ ] **2.5** `match ready_result { Ok(_) => {} Err(e) => ... }` → `if let Err(e)`
 - [ ] **2.6** Удалить мёртвый код `send_extra`
