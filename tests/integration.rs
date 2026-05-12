@@ -92,17 +92,22 @@ fn large_packet_over_unix_stream() {
     b.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
 
     // Max body size: u16 message_size = body + 8 bytes header ≤ 65535.
+    // Write from a thread so the OS socket buffer (which may be as small as
+    // ~32KB on macOS) is drained concurrently by the main thread reading.
     let body = vec![0xABu8; 65527];
     let packet = Packet {
         id: u32::MAX,
         opcode: u16::MAX,
         body,
     };
-    write_packet(&mut a, &packet).unwrap();
-    drop(a);
+    let handle = std::thread::spawn(move || {
+        write_packet(&mut a, &packet).unwrap();
+        drop(a);
+    });
 
     let received = read_packet(&mut b).unwrap().unwrap();
     assert_eq!(received, packet);
+    handle.join().unwrap();
 }
 
 // ---------------------------------------------------------------------------
