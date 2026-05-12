@@ -37,6 +37,6 @@
 
 ## Фаза 6: Документация
 
-- [ ] **6.1** README: убрать Windows-бейджи
-- [ ] **6.2** AGENTS.md: добавить контекст про build.rs probing и nightly
-- [ ] **6.3** Добавить `deny.toml` для `cargo-deny` (licenses, RUSTSEC)
+- [x] **6.1** README: убрать Windows-бейджи
+- [x] **6.2** AGENTS.md: добавить контекст про build.rs probing и nightly
+- [x] **6.3** Добавить `deny.toml` для `cargo-deny` (licenses, RUSTSEC)

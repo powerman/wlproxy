@@ -10,6 +10,8 @@ that use its downstream socket.
 - **`src/main.rs`** — точка входа, парсинг аргументов, создание и слушание downstream-сокета,
   принятие соединений.
 - **`src/proto.rs`** — чтение/запись Wayland-сообщений (8-байтовый заголовок + тело).
+- **`build.rs`** — probe компилятора для определения необходимости
+  `#![feature(unix_socket_ancillary_data)]` на старых nightly.
 
 ### Ключевые компоненты
 
@@ -58,6 +60,10 @@ Display (id=1) → get_registry (opcode=1) → Registry → bind (opcode=0) →
 - `Object type_id` для `xdg_wm_base` определяется динамически из `global`-событий
   в server→client-потоке.
 - Поддерживаются версии протокола xdg_wm_base 0–6.
+- Проект требует nightly Rust из-за unstable API `unix_socket_ancillary_data`
+  для передачи FD через Unix sockets (требуется Wayland-протоколом).
+  `build.rs` probe определяет, нужен ли `#![feature(...)]` или
+  nightly уже стабилизировал этот API.
 
 ### Tasks
 

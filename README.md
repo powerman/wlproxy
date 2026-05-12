@@ -9,7 +9,6 @@
 
 ![Linux | amd64 arm64](https://img.shields.io/badge/Linux-amd64%20arm64-royalblue)
 ![macOS | amd64 arm64](https://img.shields.io/badge/macOS-amd64%20arm64-royalblue)
-![Windows | amd64 arm64](https://img.shields.io/badge/Windows-amd64%20arm64-royalblue)
 
 Wayland socket proxy that can do minor changes to messages for any programs
 that use its downstream socket.
