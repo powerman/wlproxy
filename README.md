@@ -1,7 +1,7 @@
 # Filterway
 
 [![License MIT](https://img.shields.io/badge/license-MIT-royalblue.svg)](LICENSE)
-[![Rust](https://img.shields.io/badge/rustc-nightly-blue?logo=rust)](https://www.rust-lang.org)
+[![Rust](https://img.shields.io/badge/rustc-stable-blue?logo=rust)](https://www.rust-lang.org)
 [![Test](https://img.shields.io/github/actions/workflow/status/powerman/filterway/test.yml?label=test)](https://github.com/powerman/filterway/actions/workflows/test.yml)
 [![Coverage Status](https://raw.githubusercontent.com/powerman/filterway/gh-badges/coverage.svg)](https://github.com/powerman/filterway/actions/workflows/test.yml)
 [![Crates.io](https://img.shields.io/crates/v/filterway?logo=rust)](https://crates.io/crates/filterway)
@@ -30,7 +30,6 @@ your user ID.
 
 1. Build `filterway` with `cargo build`.
 
-   Note, socket ancillary data (required by Wayland protocol) requires unstable rust currently.
    If you use `rustup` to manage rust it should read the `rust-toolchain.toml` file and compile
    accordingly.
 

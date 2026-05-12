@@ -38,5 +38,5 @@
 ## Фаза 6: Документация
 
 - [x] **6.1** README: убрать Windows-бейджи
-- [x] **6.2** AGENTS.md: добавить контекст про build.rs probing и nightly
+- [x] **6.2** AGENTS.md: заменить информацию про nightly на stable + uds crate
 - [x] **6.3** Добавить `deny.toml` для `cargo-deny` (licenses, RUSTSEC)

@@ -44,7 +44,7 @@ jobs:
           token: ${{ env.GITHUB_TOKEN }}
           ref: ${{ needs.release-pr.outputs.version }}
 
-      - uses: dtolnay/rust-toolchain@nightly
+      - uses: dtolnay/rust-toolchain@stable
         with:
           targets: ${{ matrix.target }}
 
