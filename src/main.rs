@@ -168,7 +168,7 @@ fn main() {
             let xdgwmbase_type_id = Arc::new(Mutex::new(None));
             spawn({
                 let downstream = downstream.try_clone().unwrap();
-                let mut upstream = upstream.try_clone().unwrap();
+                let upstream = upstream.try_clone().unwrap();
                 let objects = objects.clone();
                 let xdgwmbase_type_id = xdgwmbase_type_id.clone();
                 let args = args.clone();
@@ -182,7 +182,6 @@ fn main() {
                         }
                     });
                     match (|| -> Result<(), String> {
-                        let mut send_extra = vec![];
                         let mut ancillary_mem = [0u8; 128];
                         let mut ancillary_accum = vec![];
                         // Wait for next message
@@ -396,13 +395,6 @@ fn main() {
                                 // which transfers ownership to the receiver.  Re-wrapping
                                 // in OwnedFd ensures they are closed on drop.
                                 drop(unsafe { OwnedFd::from_raw_fd(fd) });
-                            }
-                            for m in send_extra.drain(..) {
-                                if args.debug.is_some() {
-                                    eprintln!("Sending synthetic request upstream: {:?}", m);
-                                }
-                                proto::write_packet(&mut upstream, &m)
-                                    .context("Error writing message")?;
                             }
                         }
                         Ok(())
