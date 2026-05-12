@@ -51,7 +51,6 @@ description = 'Run all CI tasks'
 depends = ['fmt', 'lint', 'test']
 # Is working tree clean after fmt?
 run = '! git status --porcelain | tee /dev/stderr | grep -q .'
-run_windows = 'powershell -c "$status = git status --porcelain; if ($status) { $status; exit 1 }"'
 
 [tasks.build]
 description = 'Build release binary'

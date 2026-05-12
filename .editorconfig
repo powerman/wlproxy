@@ -16,6 +16,3 @@ indent_size = 2
 
 [*.{yml,yaml}]
 indent_size = 2
-
-[*.proto]
-indent_size = 2
