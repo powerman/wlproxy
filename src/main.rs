@@ -1,4 +1,5 @@
-#![feature(unix_socket_ancillary_data)]
+// Needed on Rust nightlies where this API is still unstable.
+#![cfg_attr(need_unix_ancillary_feature, feature(unix_socket_ancillary_data))]
 
 use {
     aargvark::{vark, Aargvark},

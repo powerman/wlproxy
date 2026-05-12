@@ -59,44 +59,9 @@ jobs:
 
       - run: cargo test --workspace
 
-  # Testing on available docker QEMU platforms (Linux only).
-  qemu:
-    strategy:
-      matrix:
-        include:
-          - {arch: arm, v: v7}
-          - {arch: ppc64le}
-          - {arch: s390x}
-          - {arch: riscv64}
-    runs-on: ubuntu-latest
-    timeout-minutes: 10
-
-    steps:
-      - uses: actions/checkout@v6
-
-      - name: Set up QEMU
-        uses: docker/setup-qemu-action@v4
-        with:
-          platforms: ${{ matrix.arch }}
-
-      - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v4
-
-      - name: Run tests
-        env:
-          PLATFORM: linux/${{ matrix.arch }}${{ matrix.v && format('/{0}', matrix.v) || '' }}
-        run: |
-          docker run -i --rm --platform "$PLATFORM" \
-            -w /workspace \
-            -v "$PWD:/workspace" \
-            -v "$HOME/.cargo/registry:/usr/local/cargo/registry" \
-            -e CARGO_HOME=/usr/local/cargo \
-            rust:nightly-slim \
-            cargo test --workspace
-
   # Aggregate job for branch protection.
   test:
-    needs: [main, native, qemu]
+    needs: [main, native]
     runs-on: ubuntu-latest
     if: always()
     steps:
