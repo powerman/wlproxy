@@ -1,6 +1,3 @@
-// Needed on Rust nightlies where this API is still unstable.
-#![cfg_attr(need_unix_ancillary_feature, feature(unix_socket_ancillary_data))]
-
 use {
     aargvark::{vark, Aargvark},
     rustix::{
@@ -12,8 +9,8 @@ use {
         collections::HashMap,
         fmt::Display,
         fs::{remove_file, File},
-        io::{Cursor, IoSlice, IoSliceMut},
-        os::unix::net::{AncillaryData, SocketAncillary, UnixListener, UnixStream},
+        io::Cursor,
+        os::unix::net::{UnixListener, UnixStream},
         path::PathBuf,
         sync::{Arc, Mutex},
         thread::spawn,
@@ -22,6 +19,7 @@ use {
 
 use filterway::proto::{self, read_arg_string};
 use filterway::ObjType;
+use uds::UnixStreamExt;
 
 #[derive(Aargvark, Clone)]
 struct Args {
@@ -60,49 +58,40 @@ impl<T, E: Display> Errorize<T> for Result<T, E> {
 
 struct AncillaryReader<'a> {
     reader: &'a UnixStream,
-    ancillary_mem: &'a mut [u8],
     fds: &'a mut Vec<RawFd>,
 }
 
 impl<'a> std::io::Read for AncillaryReader<'a> {
     fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
-        let mut ancillary = SocketAncillary::new(self.ancillary_mem);
-        let res = self
-            .reader
-            .recv_vectored_with_ancillary(&mut [IoSliceMut::new(buf)], &mut ancillary);
-        if ancillary.truncated() {
-            panic!("Ancillary buffer too small");
-        }
-        for m in ancillary.messages() {
-            let Ok(AncillaryData::ScmRights(m)) = m else {
-                continue;
-            };
-            self.fds.extend(m);
-        }
-        res
+        let mut fd_buf = [0i32; 8];
+        let (n, nfds) = self.reader.recv_fds(buf, &mut fd_buf)?;
+        self.fds.extend(&fd_buf[..nfds]);
+        Ok(n)
     }
 }
 
-struct AncillaryWriter<'a, 'b> {
+struct AncillaryWriter<'a> {
     writer: &'a UnixStream,
-    ancillary: SocketAncillary<'b>,
+    fds: Vec<RawFd>,
 }
 
-impl<'a, 'b> AncillaryWriter<'a, 'b> {
-    fn new(writer: &'a UnixStream, ancillary_mem: &'b mut [u8], fds: &Vec<RawFd>) -> Self {
-        let mut ancillary = SocketAncillary::new(ancillary_mem);
-        ancillary.add_fds(fds.as_ref());
-        Self { writer, ancillary }
+impl<'a> AncillaryWriter<'a> {
+    fn new(writer: &'a UnixStream, fds: &[RawFd]) -> Self {
+        Self {
+            writer,
+            fds: fds.to_vec(),
+        }
     }
 }
 
-impl<'a, 'b> std::io::Write for AncillaryWriter<'a, 'b> {
+impl<'a> std::io::Write for AncillaryWriter<'a> {
     fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
-        let res = self
-            .writer
-            .send_vectored_with_ancillary(&[IoSlice::new(buf)], &mut self.ancillary);
-        self.ancillary.clear();
-        res
+        let fds = std::mem::take(&mut self.fds);
+        if fds.is_empty() {
+            self.writer.write(buf)
+        } else {
+            self.writer.send_fds(buf, &fds)
+        }
     }
 
     fn flush(&mut self) -> std::io::Result<()> {
@@ -117,11 +106,9 @@ fn handle_client_to_server(
     _xdgwmbase_type_id: &Arc<Mutex<Option<(u32, u32)>>>,
     args: &Args,
 ) -> Result<(), String> {
-    let mut ancillary_mem = [0u8; 128];
     let mut ancillary_accum = vec![];
     while let Some(mut packet) = proto::read_packet(&mut AncillaryReader {
         reader: downstream,
-        ancillary_mem: &mut ancillary_mem,
         fds: &mut ancillary_accum,
     })
     .context("Error reading message")?
@@ -152,9 +139,8 @@ fn handle_client_to_server(
                             let mut cursor = Cursor::new(&packet.body);
                             let obj_type_id = proto::read_arg_uint(&mut cursor)
                                 .context("Error/eof reading bind object type id")?;
-                            proto::read_arg_string(&mut cursor).context(
-                                "Error reading bind message type string",
-                            )?;
+                            proto::read_arg_string(&mut cursor)
+                                .context("Error reading bind message type string")?;
                             let version = proto::read_arg_uint(&mut cursor)
                                 .context("Error reading bind message version")?;
                             let obj_id = proto::read_arg_uint(&mut cursor)
@@ -163,141 +149,78 @@ fn handle_client_to_server(
                                 *_xdgwmbase_type_id.lock().unwrap()
                             {
                                 if obj_type_id == want_type_id {
-                                    objects.insert(
-                                        obj_id,
-                                        ObjType::XdgWmBase {
-                                            ver: version,
-                                        },
-                                    );
+                                    objects.insert(obj_id, ObjType::XdgWmBase { ver: version });
                                 }
                             }
                         }
                     }
-                    ObjType::XdgWmBase { ver } => {
-                        match ver {
-                            0 ..= 6 => {
-                                if packet.opcode == 2 {
-                                    let mut cursor = Cursor::new(&packet.body);
-                                    let obj_id =
-                                        proto::read_arg_uint(
-                                            &mut cursor,
-                                        ).context("Error reading xdg wm base create surface id")?;
-                                    objects.insert(obj_id, ObjType::XdgSurface { ver });
-                                }
-                            },
-                            _ => return Err(format!(
-                                "Unsupported xdg_wm_base object version {ver}",
-                            )),
-                        }
-                    }
-                    ObjType::XdgSurface { ver } => {
-                        match ver {
-                            0..=6 => {
-                                if packet.opcode == 1 {
-                                    let mut cursor = Cursor::new(&packet.body);
-                                    let obj_id =
-                                        proto::read_arg_uint(
-                                            &mut cursor,
-                                        ).context(
-                                            "Error reading xdg surface create toplevel id",
-                                        )?;
-                                    objects.insert(
-                                        obj_id,
-                                        ObjType::XdgToplevel { ver },
-                                    );
-                                }
+                    ObjType::XdgWmBase { ver } => match ver {
+                        0..=6 => {
+                            if packet.opcode == 2 {
+                                let mut cursor = Cursor::new(&packet.body);
+                                let obj_id = proto::read_arg_uint(&mut cursor)
+                                    .context("Error reading xdg wm base create surface id")?;
+                                objects.insert(obj_id, ObjType::XdgSurface { ver });
                             }
-                            _ => return Err(format!(
-                                "Unsupported xdg_surface object version {ver}",
-                            )),
                         }
-                    }
-                    ObjType::XdgToplevel { ver } => {
-                        match ver {
-                            0..=6 => {
-                                match packet.opcode {
-                                    2 => {
-                                        if let Some(title) = &args.title {
-                                            let read_title =
-                                            read_arg_string(
-                                                &mut packet.body.as_slice(),
-                                            ).context("Error reading app id message body")?;
-                                            packet.body.clear();
-                                            let new_title =
-                                                if args.prefix_title.is_some() {
-                                                    format!(
-                                                        "{}{}",
-                                                        title,
-                                                        read_title
-                                                            .unwrap_or_default(
-                                                            )
-                                                    )
-                                                } else {
-                                                    title.clone()
-                                                };
-                                            proto::write_arg_string(
-                                                &mut packet.body,
-                                                &new_title,
-                                            )
-                                            .unwrap();
-                                            if args.debug.is_some() {
-                                                eprintln!(
-                                                "Modified title; new message: {:?}",
-                                                packet
-                                            );
-                                            }
-                                        }
+                        _ => return Err(format!("Unsupported xdg_wm_base object version {ver}",)),
+                    },
+                    ObjType::XdgSurface { ver } => match ver {
+                        0..=6 => {
+                            if packet.opcode == 1 {
+                                let mut cursor = Cursor::new(&packet.body);
+                                let obj_id = proto::read_arg_uint(&mut cursor)
+                                    .context("Error reading xdg surface create toplevel id")?;
+                                objects.insert(obj_id, ObjType::XdgToplevel { ver });
+                            }
+                        }
+                        _ => return Err(format!("Unsupported xdg_surface object version {ver}",)),
+                    },
+                    ObjType::XdgToplevel { ver } => match ver {
+                        0..=6 => match packet.opcode {
+                            2 => {
+                                if let Some(title) = &args.title {
+                                    let read_title =
+                                        read_arg_string(&mut packet.body.as_slice())
+                                            .context("Error reading app id message body")?;
+                                    packet.body.clear();
+                                    let new_title = if args.prefix_title.is_some() {
+                                        format!("{}{}", title, read_title.unwrap_or_default())
+                                    } else {
+                                        title.clone()
+                                    };
+                                    proto::write_arg_string(&mut packet.body, &new_title).unwrap();
+                                    if args.debug.is_some() {
+                                        eprintln!("Modified title; new message: {:?}", packet);
                                     }
-                                    3 => {
-                                        if let Some(app_id) = &args.app_id {
-                                            let read_app_id =
-                                            read_arg_string(
-                                                &mut packet.body.as_slice(),
-                                            ).context("Error reading app id message body")?;
-                                            packet.body.clear();
-                                            let new_app_id =
-                                                if args.prefix.is_some() {
-                                                    format!(
-                                                        "{}{}",
-                                                        app_id,
-                                                        read_app_id
-                                                            .unwrap_or_default(
-                                                            )
-                                                    )
-                                                } else {
-                                                    app_id.clone()
-                                                };
-                                            proto::write_arg_string(
-                                                &mut packet.body,
-                                                &new_app_id,
-                                            )
-                                            .unwrap();
-                                            if args.debug.is_some() {
-                                                eprintln!(
-                                                "Modified app id; new message: {:?}",
-                                                packet
-                                            );
-                                            }
-                                        }
-                                    }
-                                    _ => (),
                                 }
                             }
-                            _ => return Err(format!(
-                                "Unsupported xdg_toplevel object version {ver}",
-                            )),
-                        }
-                    }
+                            3 => {
+                                if let Some(app_id) = &args.app_id {
+                                    let read_app_id = read_arg_string(&mut packet.body.as_slice())
+                                        .context("Error reading app id message body")?;
+                                    packet.body.clear();
+                                    let new_app_id = if args.prefix.is_some() {
+                                        format!("{}{}", app_id, read_app_id.unwrap_or_default())
+                                    } else {
+                                        app_id.clone()
+                                    };
+                                    proto::write_arg_string(&mut packet.body, &new_app_id).unwrap();
+                                    if args.debug.is_some() {
+                                        eprintln!("Modified app id; new message: {:?}", packet);
+                                    }
+                                }
+                            }
+                            _ => (),
+                        },
+                        _ => return Err(format!("Unsupported xdg_toplevel object version {ver}",)),
+                    },
                 }
             }
         }
 
         proto::write_packet(
-            &mut AncillaryWriter::new(
-                upstream,
-                &mut ancillary_mem,
-                &ancillary_accum,
-            ),
+            &mut AncillaryWriter::new(upstream, &ancillary_accum),
             &packet,
         )
         .context("Error writing message")?;
@@ -315,12 +238,10 @@ fn handle_server_to_client(
     xdgwmbase_type_id: &Arc<Mutex<Option<(u32, u32)>>>,
     args: &Args,
 ) -> Result<(), String> {
-    let mut ancillary_mem = [0u8; 128];
     let mut ancillary_accum = vec![];
     let mut cache_reg_id = None;
     while let Some(packet) = proto::read_packet(&mut AncillaryReader {
         reader: upstream,
-        ancillary_mem: &mut ancillary_mem,
         fds: &mut ancillary_accum,
     })
     .context("Error reading message")?
@@ -335,16 +256,14 @@ fn handle_server_to_client(
 
         if (packet.id, packet.opcode) == (1, 1) {
             let mut cursor = Cursor::new(&packet.body);
-            let obj_id = proto::read_arg_uint(&mut cursor)
-                .context("Error reading display delete obj id")?;
+            let obj_id =
+                proto::read_arg_uint(&mut cursor).context("Error reading display delete obj id")?;
             objects.lock().unwrap().remove(&obj_id);
         }
         if let Some(reg_id) = match &cache_reg_id {
             Some(r) => Some(*r),
             None => {
-                if let Some(ObjType::Registry) =
-                    objects.lock().unwrap().get(&packet.id)
-                {
+                if let Some(ObjType::Registry) = objects.lock().unwrap().get(&packet.id) {
                     cache_reg_id = Some(packet.id);
                     Some(packet.id)
                 } else {
@@ -361,18 +280,13 @@ fn handle_server_to_client(
                 let version = proto::read_arg_uint(&mut cursor)
                     .context("Error reading global message version")?;
                 if type_str.as_deref() == Some("xdg_wm_base") {
-                    *xdgwmbase_type_id.lock().unwrap() =
-                        Some((type_id, version));
+                    *xdgwmbase_type_id.lock().unwrap() = Some((type_id, version));
                 }
             }
         }
 
         proto::write_packet(
-            &mut AncillaryWriter::new(
-                downstream,
-                &mut ancillary_mem,
-                &ancillary_accum,
-            ),
+            &mut AncillaryWriter::new(downstream, &ancillary_accum),
             &packet,
         )
         .context("Error writing message")?;
@@ -385,89 +299,101 @@ fn handle_server_to_client(
 
 fn main() -> Result<(), String> {
     let args = vark::<Args>();
-        let lock_path = args.downstream.with_extension("lock");
-        let filelock = File::options()
-            .mode(0o660)
-            .write(true)
-            .create(true)
-            .custom_flags(libc::O_CLOEXEC)
-            .open(&lock_path)
-            .context("Error opening lock file")?;
-        flock(
+    let lock_path = args.downstream.with_extension("lock");
+    let filelock = File::options()
+        .mode(0o660)
+        .write(true)
+        .create(true)
+        .custom_flags(libc::O_CLOEXEC)
+        .open(&lock_path)
+        .context("Error opening lock file")?;
+    flock(
             filelock.as_fd(),
             rustix::fs::FlockOperation::NonBlockingLockExclusive,
         ).context("Error getting exclusive lock for downstream listener, is another compositor already listening?")?;
-        let _defer = defer::defer(|| {
-            _ = remove_file(&lock_path);
-        });
+    let _defer = defer::defer(|| {
+        _ = remove_file(&lock_path);
+    });
+    _ = remove_file(&args.downstream);
+    let downstream =
+        UnixListener::bind(&args.downstream).context("Error creating downstream listener")?;
+    let _defer1 = defer::defer(|| {
         _ = remove_file(&args.downstream);
-        let downstream =
-            UnixListener::bind(&args.downstream).context("Error creating downstream listener")?;
-        let _defer1 = defer::defer(|| {
-            _ = remove_file(&args.downstream);
+    });
+
+    // If the system booted with systemd, inform systemd that filterway is ready using
+    // notify. Other services that depend on filterway can start now.
+    if let Ok(true) = sd_notify::booted() {
+        if args.debug.is_some() {
+            eprintln!("Init detected as being systemd. Notifying of readiness.");
+        }
+        if let Err(e) = sd_notify::notify(true, &[NotifyState::Ready]) {
+            eprintln!("Warning, failed to notify systemd with error: {}", e);
+        }
+    }
+
+    // Listen for connections
+    loop {
+        let (downstream, _) = downstream
+            .accept()
+            .context("Error accepting downstream connection")?;
+        let upstream =
+            UnixStream::connect(&args.upstream).context("Error creating upstream connection")?;
+
+        let objects = Arc::new(Mutex::new(HashMap::new()));
+        objects.lock().unwrap().insert(1, ObjType::Display);
+        let xdgwmbase_type_id = Arc::new(Mutex::new(None));
+        spawn({
+            let downstream = downstream.try_clone().unwrap();
+            let upstream = upstream.try_clone().unwrap();
+            let objects = objects.clone();
+            let xdgwmbase_type_id = xdgwmbase_type_id.clone();
+            let args = args.clone();
+            move || {
+                let _defer = defer::defer({
+                    let downstream = downstream.try_clone().unwrap();
+                    let upstream = upstream.try_clone().unwrap();
+                    move || {
+                        _ = downstream.shutdown(std::net::Shutdown::Both);
+                        _ = upstream.shutdown(std::net::Shutdown::Both);
+                    }
+                });
+                if let Err(e) = handle_client_to_server(
+                    &downstream,
+                    &upstream,
+                    &objects,
+                    &xdgwmbase_type_id,
+                    &args,
+                ) {
+                    eprintln!("Warning, client->server thread exiting with error: {}", e);
+                }
+            }
         });
-
-        // If the system booted with systemd, inform systemd that filterway is ready using
-        // notify. Other services that depend on filterway can start now.
-        if let Ok(true) = sd_notify::booted() {
-            if args.debug.is_some() {
-                eprintln!("Init detected as being systemd. Notifying of readiness.");
-            }
-            if let Err(e) = sd_notify::notify(true, &[NotifyState::Ready]) {
-                eprintln!("Warning, failed to notify systemd with error: {}", e);
-            }
-        }
-
-        // Listen for connections
-        loop {
-            let (downstream, _) = downstream
-                .accept()
-                .context("Error accepting downstream connection")?;
-            let upstream = UnixStream::connect(&args.upstream)
-                .context("Error creating upstream connection")?;
-
-            let objects = Arc::new(Mutex::new(HashMap::new()));
-            objects.lock().unwrap().insert(1, ObjType::Display);
-            let xdgwmbase_type_id = Arc::new(Mutex::new(None));
-            spawn({
-                let downstream = downstream.try_clone().unwrap();
-                let upstream = upstream.try_clone().unwrap();
-                let objects = objects.clone();
-                let xdgwmbase_type_id = xdgwmbase_type_id.clone();
-                let args = args.clone();
-                move || {
-                    let _defer = defer::defer({
-                        let downstream = downstream.try_clone().unwrap();
-                        let upstream = upstream.try_clone().unwrap();
-                        move || {
-                            _ = downstream.shutdown(std::net::Shutdown::Both);
-                            _ = upstream.shutdown(std::net::Shutdown::Both);
-                        }
-                    });
-                    if let Err(e) = handle_client_to_server(&downstream, &upstream, &objects, &xdgwmbase_type_id, &args) {
-                        eprintln!("Warning, client->server thread exiting with error: {}", e);
+        spawn({
+            let downstream = downstream.try_clone().unwrap();
+            let upstream = upstream.try_clone().unwrap();
+            let objects = objects.clone();
+            let xdgwmbase_type_id = xdgwmbase_type_id.clone();
+            let args = args.clone();
+            move || {
+                let _defer = defer::defer({
+                    let downstream = downstream.try_clone().unwrap();
+                    let upstream = upstream.try_clone().unwrap();
+                    move || {
+                        _ = downstream.shutdown(std::net::Shutdown::Both);
+                        _ = upstream.shutdown(std::net::Shutdown::Both);
                     }
+                });
+                if let Err(e) = handle_server_to_client(
+                    &upstream,
+                    &downstream,
+                    &objects,
+                    &xdgwmbase_type_id,
+                    &args,
+                ) {
+                    eprintln!("Warning, server->client thread exiting with error: {}", e);
                 }
-            });
-            spawn({
-                let downstream = downstream.try_clone().unwrap();
-                let upstream = upstream.try_clone().unwrap();
-                let objects = objects.clone();
-                let xdgwmbase_type_id = xdgwmbase_type_id.clone();
-                let args = args.clone();
-                move || {
-                    let _defer = defer::defer({
-                        let downstream = downstream.try_clone().unwrap();
-                        let upstream = upstream.try_clone().unwrap();
-                        move || {
-                            _ = downstream.shutdown(std::net::Shutdown::Both);
-                            _ = upstream.shutdown(std::net::Shutdown::Both);
-                        }
-                    });
-                    if let Err(e) = handle_server_to_client(&upstream, &downstream, &objects, &xdgwmbase_type_id, &args) {
-                        eprintln!("Warning, server->client thread exiting with error: {}", e);
-                    }
-                }
-            });
-        }
+            }
+        });
+    }
 }

@@ -242,19 +242,21 @@ fn spawn_filterway(
 /// (reading it from client before the compositor would normally see it).
 ///
 /// Returns the client itself so callers can continue sending messages.
-fn build_object_chain(
-    client: &mut UnixStream,
-    compositor: &mut UnixStream,
-) {
+fn build_object_chain(client: &mut UnixStream, compositor: &mut UnixStream) {
     // 1. Display.get_registry (opcode=1) → creates registry at id 2.
     write_packet(
         client,
-        &Packet { id: 1, opcode: 1, body: {
-            let mut b = vec![];
-            proto::write_arg_uint(&mut b, 2).unwrap();
-            b
-        }},
-    ).unwrap();
+        &Packet {
+            id: 1,
+            opcode: 1,
+            body: {
+                let mut b = vec![];
+                proto::write_arg_uint(&mut b, 2).unwrap();
+                b
+            },
+        },
+    )
+    .unwrap();
     let _ = read_packet(compositor).unwrap().unwrap();
 
     // 2. Compositor sends Registry.global (opcode=0) for xdg_wm_base, type_id=0.
@@ -263,7 +265,15 @@ fn build_object_chain(
         proto::write_arg_uint(&mut body, 0).unwrap();
         proto::write_arg_string(&mut body, "xdg_wm_base").unwrap();
         proto::write_arg_uint(&mut body, 1).unwrap();
-        write_packet(compositor, &Packet { id: 2, opcode: 0, body }).unwrap();
+        write_packet(
+            compositor,
+            &Packet {
+                id: 2,
+                opcode: 0,
+                body,
+            },
+        )
+        .unwrap();
     }
     let _ = read_packet(client).unwrap().unwrap();
 
@@ -274,7 +284,15 @@ fn build_object_chain(
         proto::write_arg_string(&mut body, "xdg_wm_base").unwrap();
         proto::write_arg_uint(&mut body, 1).unwrap();
         proto::write_arg_uint(&mut body, 3).unwrap();
-        write_packet(client, &Packet { id: 2, opcode: 0, body }).unwrap();
+        write_packet(
+            client,
+            &Packet {
+                id: 2,
+                opcode: 0,
+                body,
+            },
+        )
+        .unwrap();
     }
     let _ = read_packet(compositor).unwrap().unwrap();
 
@@ -282,7 +300,15 @@ fn build_object_chain(
     {
         let mut body = vec![];
         proto::write_arg_uint(&mut body, 4).unwrap();
-        write_packet(client, &Packet { id: 3, opcode: 2, body }).unwrap();
+        write_packet(
+            client,
+            &Packet {
+                id: 3,
+                opcode: 2,
+                body,
+            },
+        )
+        .unwrap();
     }
     let _ = read_packet(compositor).unwrap().unwrap();
 
@@ -290,7 +316,15 @@ fn build_object_chain(
     {
         let mut body = vec![];
         proto::write_arg_uint(&mut body, 5).unwrap();
-        write_packet(client, &Packet { id: 4, opcode: 1, body }).unwrap();
+        write_packet(
+            client,
+            &Packet {
+                id: 4,
+                opcode: 1,
+                body,
+            },
+        )
+        .unwrap();
     }
     let _ = read_packet(compositor).unwrap().unwrap();
 }
@@ -322,7 +356,15 @@ fn filterway_object_chain_and_app_id_replacement() {
     {
         let mut body = vec![];
         proto::write_arg_string(&mut body, "my-app").unwrap();
-        write_packet(&mut client, &Packet { id: 5, opcode: 3, body }).unwrap();
+        write_packet(
+            &mut client,
+            &Packet {
+                id: 5,
+                opcode: 3,
+                body,
+            },
+        )
+        .unwrap();
     }
     let modified = read_packet(&mut compositor).unwrap().unwrap();
 
@@ -352,7 +394,15 @@ fn filterway_title_replacement() {
     {
         let mut body = vec![];
         proto::write_arg_string(&mut body, "my-title").unwrap();
-        write_packet(&mut client, &Packet { id: 5, opcode: 2, body }).unwrap();
+        write_packet(
+            &mut client,
+            &Packet {
+                id: 5,
+                opcode: 2,
+                body,
+            },
+        )
+        .unwrap();
     }
     let modified = read_packet(&mut compositor).unwrap().unwrap();
 
@@ -373,8 +423,11 @@ fn filterway_app_id_prefix() {
     let mock_listener =
         std::os::unix::net::UnixListener::bind(dir.path().join("upstream.sock")).unwrap();
 
-    let (filterway, mut compositor, mut client) =
-        spawn_filterway(&["--app-id", "pfx-", "--prefix"], dir.path(), &mock_listener);
+    let (filterway, mut compositor, mut client) = spawn_filterway(
+        &["--app-id", "pfx-", "--prefix"],
+        dir.path(),
+        &mock_listener,
+    );
 
     build_object_chain(&mut client, &mut compositor);
 
@@ -382,7 +435,15 @@ fn filterway_app_id_prefix() {
     {
         let mut body = vec![];
         proto::write_arg_string(&mut body, "my-app").unwrap();
-        write_packet(&mut client, &Packet { id: 5, opcode: 3, body }).unwrap();
+        write_packet(
+            &mut client,
+            &Packet {
+                id: 5,
+                opcode: 3,
+                body,
+            },
+        )
+        .unwrap();
     }
     let modified = read_packet(&mut compositor).unwrap().unwrap();
 
@@ -403,8 +464,11 @@ fn filterway_title_prefix() {
     let mock_listener =
         std::os::unix::net::UnixListener::bind(dir.path().join("upstream.sock")).unwrap();
 
-    let (filterway, mut compositor, mut client) =
-        spawn_filterway(&["--title", "pfx-", "--prefix-title"], dir.path(), &mock_listener);
+    let (filterway, mut compositor, mut client) = spawn_filterway(
+        &["--title", "pfx-", "--prefix-title"],
+        dir.path(),
+        &mock_listener,
+    );
 
     build_object_chain(&mut client, &mut compositor);
 
@@ -412,7 +476,15 @@ fn filterway_title_prefix() {
     {
         let mut body = vec![];
         proto::write_arg_string(&mut body, "my-title").unwrap();
-        write_packet(&mut client, &Packet { id: 5, opcode: 2, body }).unwrap();
+        write_packet(
+            &mut client,
+            &Packet {
+                id: 5,
+                opcode: 2,
+                body,
+            },
+        )
+        .unwrap();
     }
     let modified = read_packet(&mut compositor).unwrap().unwrap();
 

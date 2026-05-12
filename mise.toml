@@ -3,7 +3,7 @@ lockfile = true # DO NOT FORGET TO `touch mise.lock` if mise.lock does not exist
 
 
 [tools]
-rust = 'nightly'
+rust = 'latest'
 
 #--- Lint
 # Static checker for GitHub Actions workflow files.
