@@ -1,4 +1,4 @@
-use std::os::unix::net::UnixStream;
+use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::PathBuf;
 use std::process::Command;
 use std::time::{Duration, Instant};
@@ -200,35 +200,37 @@ fn filterway_basic_passthrough() {
     }
 }
 
-#[test]
-fn filterway_object_chain_and_app_id_replacement() {
-    let dir = tempdir().unwrap();
-    let upstream = dir.path().join("upstream.sock");
-    let downstream = dir.path().join("downstream.sock");
+// ---------------------------------------------------------------------------
+// Helpers for filterway end-to-end tests
+// ---------------------------------------------------------------------------
 
-    // Mock compositor listener.
-    let mock_listener = std::os::unix::net::UnixListener::bind(&upstream).unwrap();
+/// Spawn filterway with the given extra args (beyond --upstream/--downstream)
+/// and accept its upstream connection against the mock listener.
+/// Returns (filterway_child, compositor_stream, client_stream).
+fn spawn_filterway(
+    extra_args: &[&str],
+    dir: &std::path::Path,
+    mock_listener: &UnixListener,
+) -> (std::process::Child, UnixStream, UnixStream) {
+    let upstream = dir.join("upstream.sock");
+    let downstream = dir.join("downstream.sock");
 
-    // Launch filterway with --app-id replacement.
-    let mut filterway = Command::new(filterway_binary())
+    let filterway = Command::new(filterway_binary())
         .args([
             "--upstream",
             upstream.to_str().unwrap(),
             "--downstream",
             downstream.to_str().unwrap(),
-            "--app-id",
-            "filtered",
         ])
+        .args(extra_args)
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::piped())
         .spawn()
         .expect("failed to start filterway");
 
-    // Connect client to filterway's downstream.
-    let mut client = connect_with_retry(&downstream, Duration::from_secs(5));
+    let client = connect_with_retry(&downstream, Duration::from_secs(5));
 
-    // Mock compositor accepts filterway's connection.
-    let (mut compositor, _) = mock_listener.accept().unwrap();
+    let (compositor, _) = mock_listener.accept().unwrap();
 
     client
         .set_read_timeout(Some(Duration::from_secs(2)))
@@ -237,124 +239,69 @@ fn filterway_object_chain_and_app_id_replacement() {
         .set_read_timeout(Some(Duration::from_secs(2)))
         .unwrap();
 
-    // -----------------------------------------------------------------------
-    // Build the Wayland object chain so filterway tracks XdgToplevel.
-    // -----------------------------------------------------------------------
+    (filterway, compositor, client)
+}
 
-    // 1. Client sends Display.get_registry (opcode=1) → creates registry at id 2.
+/// Send the standard Wayland object-chain messages that make filterway
+/// recognise a new XdgToplevel, **and forward each request to compositor**
+/// (reading it from client before the compositor would normally see it).
+///
+/// Returns the client itself so callers can continue sending messages.
+fn build_object_chain(
+    client: &mut UnixStream,
+    compositor: &mut UnixStream,
+) {
+    // 1. Display.get_registry (opcode=1) → creates registry at id 2.
     write_packet(
-        &mut client,
-        &Packet {
-            id: 1,
-            opcode: 1,
-            body: {
-                let mut b = vec![];
-                proto::write_arg_uint(&mut b, 2).unwrap();
-                b
-            },
-        },
-    )
-    .unwrap();
-    let _registry_req = read_packet(&mut compositor).unwrap().unwrap();
+        client,
+        &Packet { id: 1, opcode: 1, body: {
+            let mut b = vec![];
+            proto::write_arg_uint(&mut b, 2).unwrap();
+            b
+        }},
+    ).unwrap();
+    let _ = read_packet(compositor).unwrap().unwrap();
 
-    // 2. Compositor emits Registry.global (opcode=0) for xdg_wm_base.
-    //    type_id = 0, interface = "xdg_wm_base", version = 1.
-    let xdgwm_base_type_id = 0u32;
+    // 2. Compositor sends Registry.global (opcode=0) for xdg_wm_base, type_id=0.
     {
         let mut body = vec![];
-        proto::write_arg_uint(&mut body, xdgwm_base_type_id).unwrap();
+        proto::write_arg_uint(&mut body, 0).unwrap();
         proto::write_arg_string(&mut body, "xdg_wm_base".to_string()).unwrap();
         proto::write_arg_uint(&mut body, 1).unwrap();
-        write_packet(
-            &mut compositor,
-            &Packet {
-                id: 2,
-                opcode: 0,
-                body,
-            },
-        )
-        .unwrap();
+        write_packet(compositor, &Packet { id: 2, opcode: 0, body }).unwrap();
     }
-    let _global_event = read_packet(&mut client).unwrap().unwrap();
+    let _ = read_packet(client).unwrap().unwrap();
 
-    // 3. Client sends Registry.bind (opcode=0) → binds xdg_wm_base at id 3.
+    // 3. Client sends Registry.bind (opcode=0, id 2) → binds xdg_wm_base at id 3.
     {
         let mut body = vec![];
-        proto::write_arg_uint(&mut body, xdgwm_base_type_id).unwrap();
+        proto::write_arg_uint(&mut body, 0).unwrap();
         proto::write_arg_string(&mut body, "xdg_wm_base".to_string()).unwrap();
         proto::write_arg_uint(&mut body, 1).unwrap();
         proto::write_arg_uint(&mut body, 3).unwrap();
-        write_packet(
-            &mut client,
-            &Packet {
-                id: 2,
-                opcode: 0,
-                body,
-            },
-        )
-        .unwrap();
+        write_packet(client, &Packet { id: 2, opcode: 0, body }).unwrap();
     }
-    let _bind_req = read_packet(&mut compositor).unwrap().unwrap();
+    let _ = read_packet(compositor).unwrap().unwrap();
 
-    // 4. Client sends XdgWmBase.get_xdg_surface (opcode=2) → creates surface at id 4.
-    //    (version 1–6 all use opcode 2)
+    // 4. XdgWmBase.get_xdg_surface (opcode=2, id 3) → surface at id 4.
     {
         let mut body = vec![];
         proto::write_arg_uint(&mut body, 4).unwrap();
-        write_packet(
-            &mut client,
-            &Packet {
-                id: 3,
-                opcode: 2,
-                body,
-            },
-        )
-        .unwrap();
+        write_packet(client, &Packet { id: 3, opcode: 2, body }).unwrap();
     }
-    let _get_surface_req = read_packet(&mut compositor).unwrap().unwrap();
+    let _ = read_packet(compositor).unwrap().unwrap();
 
-    // 5. Client sends XdgSurface.create_toplevel (opcode=1) → creates toplevel at id 5.
+    // 5. XdgSurface.create_toplevel (opcode=1, id 4) → toplevel at id 5.
     {
         let mut body = vec![];
         proto::write_arg_uint(&mut body, 5).unwrap();
-        write_packet(
-            &mut client,
-            &Packet {
-                id: 4,
-                opcode: 1,
-                body,
-            },
-        )
-        .unwrap();
+        write_packet(client, &Packet { id: 4, opcode: 1, body }).unwrap();
     }
-    let _create_toplevel_req = read_packet(&mut compositor).unwrap().unwrap();
+    let _ = read_packet(compositor).unwrap().unwrap();
+}
 
-    // 6. Client sends XdgToplevel.set_app_id (opcode=3) with original app_id "my-app".
-    {
-        let mut body = vec![];
-        proto::write_arg_string(&mut body, "my-app".to_string()).unwrap();
-        write_packet(
-            &mut client,
-            &Packet {
-                id: 5,
-                opcode: 3,
-                body,
-            },
-        )
-        .unwrap();
-    }
-    let modified = read_packet(&mut compositor).unwrap().unwrap();
-
-    // 7. Filterway should have replaced app_id "my-app" with "filtered".
-    let mut cursor = std::io::Cursor::new(&modified.body[..]);
-    let replaced = proto::read_arg_string(&mut cursor).unwrap();
-    assert_eq!(
-        replaced.as_deref(),
-        Some("filtered"),
-        "app_id replacement failed: got {replaced:?}"
-    );
-
-    // Cleanup.
+/// Kill the filterway child and print stderr if the exit code is non-zero.
+fn cleanup_filterway(mut filterway: std::process::Child) {
     filterway.kill().unwrap();
     let output = filterway.wait_with_output().unwrap();
     if !output.status.success() {
@@ -363,4 +310,64 @@ fn filterway_object_chain_and_app_id_replacement() {
             eprintln!("filterway stderr:\n{stderr}");
         }
     }
+}
+
+#[test]
+fn filterway_object_chain_and_app_id_replacement() {
+    let dir = tempdir().unwrap();
+    let mock_listener =
+        std::os::unix::net::UnixListener::bind(dir.path().join("upstream.sock")).unwrap();
+
+    let (filterway, mut compositor, mut client) =
+        spawn_filterway(&["--app-id", "filtered"], dir.path(), &mock_listener);
+
+    build_object_chain(&mut client, &mut compositor);
+
+    // Client sends XdgToplevel.set_app_id (opcode=3, id 5) with original app_id "my-app".
+    {
+        let mut body = vec![];
+        proto::write_arg_string(&mut body, "my-app".to_string()).unwrap();
+        write_packet(&mut client, &Packet { id: 5, opcode: 3, body }).unwrap();
+    }
+    let modified = read_packet(&mut compositor).unwrap().unwrap();
+
+    let mut cursor = std::io::Cursor::new(&modified.body[..]);
+    let replaced = proto::read_arg_string(&mut cursor).unwrap();
+    assert_eq!(
+        replaced.as_deref(),
+        Some("filtered"),
+        "app_id replacement failed: got {replaced:?}"
+    );
+
+    cleanup_filterway(filterway);
+}
+
+#[test]
+fn filterway_title_replacement() {
+    let dir = tempdir().unwrap();
+    let mock_listener =
+        std::os::unix::net::UnixListener::bind(dir.path().join("upstream.sock")).unwrap();
+
+    let (filterway, mut compositor, mut client) =
+        spawn_filterway(&["--title", "filtered-title"], dir.path(), &mock_listener);
+
+    build_object_chain(&mut client, &mut compositor);
+
+    // Client sends XdgToplevel.set_title (opcode=2, id 5) with original title "my-title".
+    {
+        let mut body = vec![];
+        proto::write_arg_string(&mut body, "my-title".to_string()).unwrap();
+        write_packet(&mut client, &Packet { id: 5, opcode: 2, body }).unwrap();
+    }
+    let modified = read_packet(&mut compositor).unwrap().unwrap();
+
+    let mut cursor = std::io::Cursor::new(&modified.body[..]);
+    let replaced = proto::read_arg_string(&mut cursor).unwrap();
+    assert_eq!(
+        replaced.as_deref(),
+        Some("filtered-title"),
+        "title replacement failed: got {replaced:?}"
+    );
+
+    cleanup_filterway(filterway);
 }
