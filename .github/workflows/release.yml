@@ -88,9 +88,9 @@ jobs:
         working-directory: ${{ steps.build.outputs.release_asset_dir }}
         run: |
           for file in *; do
-            if [[ -f "$file" && ! "$file" =~ \.(sha256|md5|sig)$ ]]; then
+            if [[ -f "$file" && ! "$file" =~ \.(sha256|md5|sig|bundle)$ ]]; then
               echo "Signing $file..."
-              cosign sign-blob --yes "$file" --output-signature "${file}.sig"
+              cosign sign-blob --yes "$file" --bundle "${file}.bundle"
             fi
           done
 
