@@ -506,3 +506,219 @@ fn filterway_title_prefix() {
 
     cleanup_filterway(filterway);
 }
+
+// ---------------------------------------------------------------------------
+// Object removal tracking (Display.delete_id)
+// ---------------------------------------------------------------------------
+
+#[test]
+fn filterway_delete_id() {
+    let dir = tempdir().unwrap();
+    let mock_listener =
+        std::os::unix::net::UnixListener::bind(dir.path().join("upstream.sock")).unwrap();
+
+    let (filterway, mut compositor, mut client) =
+        spawn_filterway(&["--app-id", "filtered"], dir.path(), &mock_listener);
+
+    build_object_chain(&mut client, &mut compositor);
+
+    // Compositor sends Display.delete_id for obj 5 (XdgToplevel).
+    {
+        let mut body = vec![];
+        proto::write_arg_uint(&mut body, 5).unwrap();
+        write_packet(&mut compositor, &Packet { id: 1, opcode: 1, body }).unwrap();
+    }
+    // Client drains the forwarded delete_id (server→client thread removes obj 5 first).
+    let _ = read_packet(&mut client).unwrap().unwrap();
+
+    // Client sends set_app_id for obj 5 → should passthrough UNMODIFIED
+    // because obj 5 is no longer tracked.
+    {
+        let mut body = vec![];
+        proto::write_arg_string(&mut body, "my-app").unwrap();
+        write_packet(&mut client, &Packet { id: 5, opcode: 3, body }).unwrap();
+    }
+    let received = read_packet(&mut compositor).unwrap().unwrap();
+    let mut cursor = std::io::Cursor::new(&received.body[..]);
+    let app_id = proto::read_arg_string(&mut cursor).unwrap();
+    assert_eq!(
+        app_id.as_deref(),
+        Some("my-app"),
+        "set_app_id should pass through unmodified after delete_id: got {app_id:?}"
+    );
+
+    cleanup_filterway(filterway);
+}
+
+// ---------------------------------------------------------------------------
+// Global event filtering — only xdg_wm_base objects are tracked
+// ---------------------------------------------------------------------------
+
+#[test]
+fn filterway_global_filtering() {
+    let dir = tempdir().unwrap();
+    let mock_listener =
+        std::os::unix::net::UnixListener::bind(dir.path().join("upstream.sock")).unwrap();
+
+    let (filterway, mut compositor, mut client) =
+        spawn_filterway(&["--app-id", "filtered"], dir.path(), &mock_listener);
+
+    // ---- Custom object chain with multiple globals ----
+
+    // 0. Client sends Display.get_registry (opcode=1, id 1) → Registry at id 2.
+    {
+        let mut body = vec![];
+        proto::write_arg_uint(&mut body, 2).unwrap();
+        write_packet(&mut client, &Packet { id: 1, opcode: 1, body }).unwrap();
+    }
+    let _ = read_packet(&mut compositor).unwrap().unwrap();
+
+    // 1. Compositor sends global for wl_compositor (NOT xdg_wm_base, type_id=0).
+    {
+        let mut body = vec![];
+        proto::write_arg_uint(&mut body, 0).unwrap();
+        proto::write_arg_string(&mut body, "wl_compositor").unwrap();
+        proto::write_arg_uint(&mut body, 4).unwrap();
+        write_packet(&mut compositor, &Packet { id: 2, opcode: 0, body }).unwrap();
+    }
+    let _ = read_packet(&mut client).unwrap().unwrap();
+
+    // 2. Compositor sends global for xdg_wm_base (type_id=1).
+    {
+        let mut body = vec![];
+        proto::write_arg_uint(&mut body, 1).unwrap();
+        proto::write_arg_string(&mut body, "xdg_wm_base").unwrap();
+        proto::write_arg_uint(&mut body, 6).unwrap();
+        write_packet(&mut compositor, &Packet { id: 2, opcode: 0, body }).unwrap();
+    }
+    let _ = read_packet(&mut client).unwrap().unwrap();
+
+    // 3. Client binds wl_compositor (type_id=0) → obj 3 (NOT tracked, wrong type_id).
+    {
+        let mut body = vec![];
+        proto::write_arg_uint(&mut body, 0).unwrap();
+        proto::write_arg_string(&mut body, "wl_compositor").unwrap();
+        proto::write_arg_uint(&mut body, 4).unwrap();
+        proto::write_arg_uint(&mut body, 3).unwrap();
+        write_packet(&mut client, &Packet { id: 2, opcode: 0, body }).unwrap();
+    }
+    let _ = read_packet(&mut compositor).unwrap().unwrap();
+
+    // 4. Client binds xdg_wm_base (type_id=1) → obj 4 (SHOULD be tracked).
+    {
+        let mut body = vec![];
+        proto::write_arg_uint(&mut body, 1).unwrap();
+        proto::write_arg_string(&mut body, "xdg_wm_base").unwrap();
+        proto::write_arg_uint(&mut body, 6).unwrap();
+        proto::write_arg_uint(&mut body, 4).unwrap();
+        write_packet(&mut client, &Packet { id: 2, opcode: 0, body }).unwrap();
+    }
+    let _ = read_packet(&mut compositor).unwrap().unwrap();
+
+    // 5. XdgWmBase.get_xdg_surface (opcode=2, id 4) → surface at id 5.
+    {
+        let mut body = vec![];
+        proto::write_arg_uint(&mut body, 5).unwrap();
+        write_packet(&mut client, &Packet { id: 4, opcode: 2, body }).unwrap();
+    }
+    let _ = read_packet(&mut compositor).unwrap().unwrap();
+
+    // 6. XdgSurface.create_toplevel (opcode=1, id 5) → toplevel at id 6.
+    {
+        let mut body = vec![];
+        proto::write_arg_uint(&mut body, 6).unwrap();
+        write_packet(&mut client, &Packet { id: 5, opcode: 1, body }).unwrap();
+    }
+    let _ = read_packet(&mut compositor).unwrap().unwrap();
+
+    // 7. set_app_id on obj 3 (NOT tracked) → passthrough UNMODIFIED.
+    {
+        let mut body = vec![];
+        proto::write_arg_string(&mut body, "my-app-3").unwrap();
+        write_packet(&mut client, &Packet { id: 3, opcode: 3, body }).unwrap();
+    }
+    {
+        let received = read_packet(&mut compositor).unwrap().unwrap();
+        let mut cursor = std::io::Cursor::new(&received.body[..]);
+        let app_id = proto::read_arg_string(&mut cursor).unwrap();
+        assert_eq!(
+            app_id.as_deref(),
+            Some("my-app-3"),
+            "obj 3 (wl_compositor) should pass through unmodified: got {app_id:?}"
+        );
+    }
+
+    // 8. set_app_id on obj 6 (XdgToplevel) → REPLACED.
+    {
+        let mut body = vec![];
+        proto::write_arg_string(&mut body, "some-app").unwrap();
+        write_packet(&mut client, &Packet { id: 6, opcode: 3, body }).unwrap();
+    }
+    {
+        let received = read_packet(&mut compositor).unwrap().unwrap();
+        let mut cursor = std::io::Cursor::new(&received.body[..]);
+        let app_id = proto::read_arg_string(&mut cursor).unwrap();
+        assert_eq!(
+            app_id.as_deref(),
+            Some("filtered"),
+            "obj 6 (XdgToplevel) should have app_id replaced: got {app_id:?}"
+        );
+    }
+
+    cleanup_filterway(filterway);
+}
+
+// ---------------------------------------------------------------------------
+// FD forwarding in server→client direction
+// ---------------------------------------------------------------------------
+
+#[test]
+fn filterway_fd_forwarding_server_to_client() {
+    use std::io::Read;
+    use std::os::unix::io::{AsRawFd, FromRawFd, OwnedFd};
+    use uds::UnixStreamExt;
+
+    let dir = tempdir().unwrap();
+    let mock_listener =
+        std::os::unix::net::UnixListener::bind(dir.path().join("upstream.sock")).unwrap();
+
+    let (filterway, compositor, mut client) =
+        spawn_filterway(&[], dir.path(), &mock_listener);
+
+    // Create a dummy socket pair — one end's FD is sent through filterway.
+    let (dummy_send, dummy_recv) = std::os::unix::net::UnixStream::pair().unwrap();
+    let send_fd = dummy_send.as_raw_fd();
+
+    // Build a minimal valid Wayland packet (empty body → 8 bytes total).
+    let mut packet_bytes = vec![];
+    write_packet(&mut packet_bytes, &Packet { id: 1, opcode: 0, body: vec![] }).unwrap();
+    assert_eq!(packet_bytes.len(), 8);
+
+    // Compositor sends the packet with an FD attached.
+    compositor.send_fds(&packet_bytes, &[send_fd]).unwrap();
+    drop(dummy_send);
+
+    // Client reads from downstream (via filterway).
+    // filterway should forward both data and the FD.
+    // AncillaryWriter sends header_word1 (4 bytes + FD) and header_word2 (4 bytes)
+    // as separate write() calls — recv_fds may return only the first chunk.
+    let mut buf = [0u8; 8];
+    let mut fd_buf = [0i32; 8];
+    let (n, nfds) = client.recv_fds(&mut buf, &mut fd_buf).unwrap();
+    assert!(nfds == 1, "FD should be forwarded by filterway");
+    assert!(fd_buf[0] > 0, "received FD should be valid");
+    if n < 8 {
+        client.read_exact(&mut buf[n..]).unwrap();
+    }
+
+    // Parse and verify the packet content.
+    let mut cursor = std::io::Cursor::new(&buf[..]);
+    let received = read_packet(&mut cursor).unwrap().unwrap();
+    assert_eq!(received, Packet { id: 1, opcode: 0, body: vec![] });
+
+    // Close the received FD.
+    drop(unsafe { OwnedFd::from_raw_fd(fd_buf[0]) });
+    drop(dummy_recv);
+
+    cleanup_filterway(filterway);
+}
