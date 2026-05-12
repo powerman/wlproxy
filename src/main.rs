@@ -264,13 +264,9 @@ fn main() {
                                                         objects.insert(obj_id, ObjType::XdgSurface { ver });
                                                     }
                                                 },
-                                                _ => panic!(
-                                                    "Unsupported xdg_wm_base object version {}_{}_{}_{}",
-                                                    ver,
-                                                    ver,
-                                                    ver,
-                                                    ver
-                                                ),
+                                                _ => return Err(format!(
+                                                    "Unsupported xdg_wm_base object version {ver}",
+                                                )),
                                             }
                                         }
                                         ObjType::XdgSurface { ver } => {
@@ -291,10 +287,9 @@ fn main() {
                                                         );
                                                     }
                                                 }
-                                                _ => panic!(
-                                                    "Unsupported xdg_surface object version {}",
-                                                    ver
-                                                ),
+                                                _ => return Err(format!(
+                                                    "Unsupported xdg_surface object version {ver}",
+                                                )),
                                             }
                                         }
                                         ObjType::XdgToplevel { ver } => {
@@ -370,10 +365,9 @@ fn main() {
                                                         _ => (),
                                                     }
                                                 }
-                                                _ => panic!(
-                                                    "Unsupported xdg_toplevel object version {}",
-                                                    ver
-                                                ),
+                                                _ => return Err(format!(
+                                                    "Unsupported xdg_toplevel object version {ver}",
+                                                )),
                                             }
                                         }
                                     }
