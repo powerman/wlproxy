@@ -26,7 +26,7 @@
 ## Фаза 4: Архитектура
 
 - [x] **4.1** Вынести `ObjType` enum на уровень модуля
-- [ ] **4.2** Извлечь обработчики client→server и server→client в именованные функции
+- [x] **4.2** Извлечь обработчики client→server и server→client в именованные функции
 - [ ] **4.3** Убрать `fn inner()` / `match inner()` — `fn main() -> anyhow::Result<()>`
 
 ## Фаза 5: CI и сборка
