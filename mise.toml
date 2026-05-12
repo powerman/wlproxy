@@ -1,0 +1,41 @@
+[settings]
+lockfile = true
+
+
+[tools]
+"cargo:cargo-nextest" = "latest"
+rust = 'nightly'
+
+
+[tasks.fmt]
+description = 'Format all files'
+depends = ['fmt:rust']
+
+[tasks.lint]
+description = 'Run all linters'
+depends = ['lint:rust']
+
+[tasks.test]
+description = 'Run all tests'
+depends = ['test:rust']
+
+[tasks.default]
+description = 'Run all linters and tests'
+depends = ['lint', 'test']
+
+[tasks.ci]
+description = 'Run all CI tasks'
+depends = ['fmt', 'lint', 'test']
+run = '! git status --porcelain | tee /dev/stderr | grep -q .'
+
+[tasks.'fmt:rust']
+description = 'Format Rust code'
+run = 'cargo fmt --all'
+
+[tasks.'lint:rust']
+description = 'Lint Rust code with clippy'
+run = 'cargo clippy --workspace --all-targets -- -D warnings'
+
+[tasks.'test:rust']
+description = 'Run Rust tests'
+run = 'cargo nextest run --workspace --no-tests pass'
