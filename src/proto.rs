@@ -67,9 +67,7 @@ pub fn read_arg_uint(serial: &mut impl std::io::Read) -> Result<u32, &str> {
 }
 
 pub fn write_arg_uint(serial: &mut impl std::io::Write, data: u32) -> Result<(), &str> {
-    serial
-        .write_all(&data.to_ne_bytes())
-        .map_err(|_| "string length")?;
+    serial.write_all(&data.to_ne_bytes()).map_err(|_| "arg")?;
     Ok(())
 }
 
