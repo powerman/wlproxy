@@ -1,10 +1,10 @@
 [package]
-name = "filterway"
+name = "wlproxy"
 version = "0.1.0"
 edition = "2021"
 description = "Filter/modify Wayland messages from clients"
 readme = "README.md"
-repository = "https://github.com/powerman/filterway"
+repository = "https://github.com/powerman/wlproxy"
 license = "MIT"
 
 [dependencies]

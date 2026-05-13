@@ -3,8 +3,8 @@ use std::path::PathBuf;
 use std::process::Command;
 use std::time::{Duration, Instant};
 
-use filterway::proto::{self, read_packet, write_packet, Packet};
 use tempfile::tempdir;
+use wlproxy::proto::{self, read_packet, write_packet, Packet};
 
 // ---------------------------------------------------------------------------
 // Proto functions over a real UnixStream pair
@@ -114,13 +114,13 @@ fn large_packet_over_unix_stream() {
 }
 
 // ---------------------------------------------------------------------------
-// Filterway binary passthrough (end-to-end)
+// Binary passthrough (end-to-end)
 // ---------------------------------------------------------------------------
 
-fn filterway_binary() -> PathBuf {
-    std::env::var("CARGO_BIN_EXE_filterway")
+fn wlproxy_binary() -> PathBuf {
+    std::env::var("CARGO_BIN_EXE_wlproxy")
         .map(PathBuf::from)
-        .expect("filterway binary not found — run `cargo test` (CARGO_BIN_EXE_filterway is always set by cargo test)")
+        .expect("wlproxy binary not found — run `cargo test` (CARGO_BIN_EXE_wlproxy is always set by cargo test)")
 }
 
 fn connect_with_retry(path: &std::path::Path, timeout: Duration) -> UnixStream {
@@ -137,16 +137,16 @@ fn connect_with_retry(path: &std::path::Path, timeout: Duration) -> UnixStream {
 }
 
 #[test]
-fn filterway_basic_passthrough() {
+fn wlproxy_basic_passthrough() {
     let dir = tempdir().unwrap();
     let upstream = dir.path().join("upstream.sock");
     let downstream = dir.path().join("downstream.sock");
 
-    // Start mock compositor (listener for filterway's upstream connection).
+    // Start mock compositor (listener for wlproxy's upstream connection).
     let mock_listener = std::os::unix::net::UnixListener::bind(&upstream).unwrap();
 
-    // Launch filterway.
-    let mut filterway = Command::new(filterway_binary())
+    // Launch wlproxy.
+    let mut wlproxy = Command::new(wlproxy_binary())
         .args([
             "--upstream",
             upstream.to_str().unwrap(),
@@ -156,12 +156,12 @@ fn filterway_basic_passthrough() {
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::piped())
         .spawn()
-        .expect("failed to start filterway");
+        .expect("failed to start wlproxy");
 
-    // Connect as a client to filterway's downstream socket.
+    // Connect as a client to wlproxy's downstream socket.
     let mut client = connect_with_retry(&downstream, Duration::from_secs(5));
 
-    // Mock compositor accepts filterway's connection.
+    // Mock compositor accepts wlproxy's connection.
     let (mut compositor, _) = mock_listener.accept().unwrap();
 
     client
@@ -171,7 +171,7 @@ fn filterway_basic_passthrough() {
         .set_read_timeout(Some(Duration::from_secs(2)))
         .unwrap();
 
-    // Send message client → filterway → compositor.
+    // Send message client → wlproxy → compositor.
     let sent = Packet {
         id: 1,
         opcode: 0,
@@ -181,7 +181,7 @@ fn filterway_basic_passthrough() {
     let received = read_packet(&mut compositor).unwrap().unwrap();
     assert_eq!(received, sent, "client→compositor passthrough failed");
 
-    // Send message compositor → filterway → client.
+    // Send message compositor → wlproxy → client.
     // Use opcode=0 (no special handling on Display) with a non-empty body.
     let reply = Packet {
         id: 1,
@@ -193,24 +193,24 @@ fn filterway_basic_passthrough() {
     assert_eq!(received, reply, "compositor→client passthrough failed");
 
     // Cleanup.
-    filterway.kill().unwrap();
-    let output = filterway.wait_with_output().unwrap();
+    wlproxy.kill().unwrap();
+    let output = wlproxy.wait_with_output().unwrap();
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
         if !stderr.is_empty() {
-            eprintln!("filterway stderr:\n{stderr}");
+            eprintln!("wlproxy stderr:\n{stderr}");
         }
     }
 }
 
 // ---------------------------------------------------------------------------
-// Helpers for filterway end-to-end tests
+// Helpers for wlproxy end-to-end tests
 // ---------------------------------------------------------------------------
 
-/// Spawn filterway with the given extra args (beyond --upstream/--downstream)
+/// Spawn wlproxy with the given extra args (beyond --upstream/--downstream)
 /// and accept its upstream connection against the mock listener.
-/// Returns (filterway_child, compositor_stream, client_stream).
-fn spawn_filterway(
+/// Returns (wlproxy_child, compositor_stream, client_stream).
+fn spawn_wlproxy(
     extra_args: &[&str],
     dir: &std::path::Path,
     mock_listener: &UnixListener,
@@ -218,7 +218,7 @@ fn spawn_filterway(
     let upstream = dir.join("upstream.sock");
     let downstream = dir.join("downstream.sock");
 
-    let filterway = Command::new(filterway_binary())
+    let wlproxy = Command::new(wlproxy_binary())
         .args([
             "--upstream",
             upstream.to_str().unwrap(),
@@ -229,7 +229,7 @@ fn spawn_filterway(
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::piped())
         .spawn()
-        .expect("failed to start filterway");
+        .expect("failed to start wlproxy");
 
     let client = connect_with_retry(&downstream, Duration::from_secs(5));
 
@@ -242,10 +242,10 @@ fn spawn_filterway(
         .set_read_timeout(Some(Duration::from_secs(2)))
         .unwrap();
 
-    (filterway, compositor, client)
+    (wlproxy, compositor, client)
 }
 
-/// Send the standard Wayland object-chain messages that make filterway
+/// Send the standard Wayland object-chain messages that make wlproxy
 /// recognise a new XdgToplevel, **and forward each request to compositor**
 /// (reading it from client before the compositor would normally see it).
 ///
@@ -337,26 +337,26 @@ fn build_object_chain(client: &mut UnixStream, compositor: &mut UnixStream) {
     let _ = read_packet(compositor).unwrap().unwrap();
 }
 
-/// Kill the filterway child and print stderr if the exit code is non-zero.
-fn cleanup_filterway(mut filterway: std::process::Child) {
-    filterway.kill().unwrap();
-    let output = filterway.wait_with_output().unwrap();
+/// Kill the wlproxy child and print stderr if the exit code is non-zero.
+fn cleanup_wlproxy(mut wlproxy: std::process::Child) {
+    wlproxy.kill().unwrap();
+    let output = wlproxy.wait_with_output().unwrap();
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
         if !stderr.is_empty() {
-            eprintln!("filterway stderr:\n{stderr}");
+            eprintln!("wlproxy stderr:\n{stderr}");
         }
     }
 }
 
 #[test]
-fn filterway_object_chain_and_app_id_replacement() {
+fn wlproxy_object_chain_and_app_id_replacement() {
     let dir = tempdir().unwrap();
     let mock_listener =
         std::os::unix::net::UnixListener::bind(dir.path().join("upstream.sock")).unwrap();
 
-    let (filterway, mut compositor, mut client) =
-        spawn_filterway(&["--app-id", "filtered"], dir.path(), &mock_listener);
+    let (wlproxy, mut compositor, mut client) =
+        spawn_wlproxy(&["--app-id", "filtered"], dir.path(), &mock_listener);
 
     build_object_chain(&mut client, &mut compositor);
 
@@ -384,17 +384,17 @@ fn filterway_object_chain_and_app_id_replacement() {
         "app_id replacement failed: got {replaced:?}"
     );
 
-    cleanup_filterway(filterway);
+    cleanup_wlproxy(wlproxy);
 }
 
 #[test]
-fn filterway_title_replacement() {
+fn wlproxy_title_replacement() {
     let dir = tempdir().unwrap();
     let mock_listener =
         std::os::unix::net::UnixListener::bind(dir.path().join("upstream.sock")).unwrap();
 
-    let (filterway, mut compositor, mut client) =
-        spawn_filterway(&["--title", "filtered-title"], dir.path(), &mock_listener);
+    let (wlproxy, mut compositor, mut client) =
+        spawn_wlproxy(&["--title", "filtered-title"], dir.path(), &mock_listener);
 
     build_object_chain(&mut client, &mut compositor);
 
@@ -422,16 +422,16 @@ fn filterway_title_replacement() {
         "title replacement failed: got {replaced:?}"
     );
 
-    cleanup_filterway(filterway);
+    cleanup_wlproxy(wlproxy);
 }
 
 #[test]
-fn filterway_app_id_prefix() {
+fn wlproxy_app_id_prefix() {
     let dir = tempdir().unwrap();
     let mock_listener =
         std::os::unix::net::UnixListener::bind(dir.path().join("upstream.sock")).unwrap();
 
-    let (filterway, mut compositor, mut client) = spawn_filterway(
+    let (wlproxy, mut compositor, mut client) = spawn_wlproxy(
         &["--app-id", "pfx-", "--prefix"],
         dir.path(),
         &mock_listener,
@@ -463,16 +463,16 @@ fn filterway_app_id_prefix() {
         "app_id prefix failed: got {replaced:?}"
     );
 
-    cleanup_filterway(filterway);
+    cleanup_wlproxy(wlproxy);
 }
 
 #[test]
-fn filterway_title_prefix() {
+fn wlproxy_title_prefix() {
     let dir = tempdir().unwrap();
     let mock_listener =
         std::os::unix::net::UnixListener::bind(dir.path().join("upstream.sock")).unwrap();
 
-    let (filterway, mut compositor, mut client) = spawn_filterway(
+    let (wlproxy, mut compositor, mut client) = spawn_wlproxy(
         &["--title", "pfx-", "--prefix-title"],
         dir.path(),
         &mock_listener,
@@ -504,7 +504,7 @@ fn filterway_title_prefix() {
         "title prefix failed: got {replaced:?}"
     );
 
-    cleanup_filterway(filterway);
+    cleanup_wlproxy(wlproxy);
 }
 
 // ---------------------------------------------------------------------------
@@ -512,13 +512,13 @@ fn filterway_title_prefix() {
 // ---------------------------------------------------------------------------
 
 #[test]
-fn filterway_delete_id() {
+fn wlproxy_delete_id() {
     let dir = tempdir().unwrap();
     let mock_listener =
         std::os::unix::net::UnixListener::bind(dir.path().join("upstream.sock")).unwrap();
 
-    let (filterway, mut compositor, mut client) =
-        spawn_filterway(&["--app-id", "filtered"], dir.path(), &mock_listener);
+    let (wlproxy, mut compositor, mut client) =
+        spawn_wlproxy(&["--app-id", "filtered"], dir.path(), &mock_listener);
 
     build_object_chain(&mut client, &mut compositor);
 
@@ -563,7 +563,7 @@ fn filterway_delete_id() {
         "set_app_id should pass through unmodified after delete_id: got {app_id:?}"
     );
 
-    cleanup_filterway(filterway);
+    cleanup_wlproxy(wlproxy);
 }
 
 // ---------------------------------------------------------------------------
@@ -571,13 +571,13 @@ fn filterway_delete_id() {
 // ---------------------------------------------------------------------------
 
 #[test]
-fn filterway_global_filtering() {
+fn wlproxy_global_filtering() {
     let dir = tempdir().unwrap();
     let mock_listener =
         std::os::unix::net::UnixListener::bind(dir.path().join("upstream.sock")).unwrap();
 
-    let (filterway, mut compositor, mut client) =
-        spawn_filterway(&["--app-id", "filtered"], dir.path(), &mock_listener);
+    let (wlproxy, mut compositor, mut client) =
+        spawn_wlproxy(&["--app-id", "filtered"], dir.path(), &mock_listener);
 
     // ---- Custom object chain with multiple globals ----
 
@@ -753,7 +753,7 @@ fn filterway_global_filtering() {
         );
     }
 
-    cleanup_filterway(filterway);
+    cleanup_wlproxy(wlproxy);
 }
 
 // ---------------------------------------------------------------------------
@@ -761,7 +761,7 @@ fn filterway_global_filtering() {
 // ---------------------------------------------------------------------------
 
 #[test]
-fn filterway_fd_forwarding_server_to_client() {
+fn wlproxy_fd_forwarding_server_to_client() {
     use std::io::Read;
     use std::os::unix::io::{AsRawFd, FromRawFd, OwnedFd};
     use uds::UnixStreamExt;
@@ -770,9 +770,9 @@ fn filterway_fd_forwarding_server_to_client() {
     let mock_listener =
         std::os::unix::net::UnixListener::bind(dir.path().join("upstream.sock")).unwrap();
 
-    let (filterway, compositor, mut client) = spawn_filterway(&[], dir.path(), &mock_listener);
+    let (wlproxy, compositor, mut client) = spawn_wlproxy(&[], dir.path(), &mock_listener);
 
-    // Create a dummy socket pair — one end's FD is sent through filterway.
+    // Create a dummy socket pair — one end's FD is sent through wlproxy.
     let (dummy_send, dummy_recv) = std::os::unix::net::UnixStream::pair().unwrap();
     let send_fd = dummy_send.as_raw_fd();
 
@@ -793,14 +793,14 @@ fn filterway_fd_forwarding_server_to_client() {
     compositor.send_fds(&packet_bytes, &[send_fd]).unwrap();
     drop(dummy_send);
 
-    // Client reads from downstream (via filterway).
-    // filterway should forward both data and the FD.
+    // Client reads from downstream (via wlproxy).
+    // wlproxy should forward both data and the FD.
     // AncillaryWriter sends header_word1 (4 bytes + FD) and header_word2 (4 bytes)
     // as separate write() calls — recv_fds may return only the first chunk.
     let mut buf = [0u8; 8];
     let mut fd_buf = [0i32; 8];
     let (n, nfds) = client.recv_fds(&mut buf, &mut fd_buf).unwrap();
-    assert!(nfds == 1, "FD should be forwarded by filterway");
+    assert!(nfds == 1, "FD should be forwarded by wlproxy");
     assert!(fd_buf[0] > 0, "received FD should be valid");
     if n < 8 {
         client.read_exact(&mut buf[n..]).unwrap();
@@ -822,7 +822,7 @@ fn filterway_fd_forwarding_server_to_client() {
     drop(unsafe { OwnedFd::from_raw_fd(fd_buf[0]) });
     drop(dummy_recv);
 
-    cleanup_filterway(filterway);
+    cleanup_wlproxy(wlproxy);
 }
 
 // ---------------------------------------------------------------------------
@@ -830,12 +830,12 @@ fn filterway_fd_forwarding_server_to_client() {
 // ---------------------------------------------------------------------------
 
 #[test]
-fn filterway_block_interfaces() {
+fn wlproxy_block_interfaces() {
     let dir = tempdir().unwrap();
     let mock_listener =
         std::os::unix::net::UnixListener::bind(dir.path().join("upstream.sock")).unwrap();
 
-    let (filterway, mut compositor, mut client) = spawn_filterway(
+    let (wlproxy, mut compositor, mut client) = spawn_wlproxy(
         &[
             "--block",
             "zwlr_layer_shell_v1,ext_data_control_manager_v1,zwlr_screencopy_manager_v1",
@@ -933,17 +933,17 @@ fn filterway_block_interfaces() {
         "expected sentinel after allowed interfaces"
     );
 
-    cleanup_filterway(filterway);
+    cleanup_wlproxy(wlproxy);
 }
 
 #[test]
-fn filterway_block_interfaces_app_id_still_works() {
+fn wlproxy_block_interfaces_app_id_still_works() {
     let dir = tempdir().unwrap();
     let mock_listener =
         std::os::unix::net::UnixListener::bind(dir.path().join("upstream.sock")).unwrap();
 
     // Block unrelated interfaces; app_id replacement should still work.
-    let (filterway, mut compositor, mut client) = spawn_filterway(
+    let (wlproxy, mut compositor, mut client) = spawn_wlproxy(
         &[
             "--app-id",
             "filtered",
@@ -979,11 +979,11 @@ fn filterway_block_interfaces_app_id_still_works() {
         "app_id replacement should work alongside interface blocking: got {replaced:?}"
     );
 
-    cleanup_filterway(filterway);
+    cleanup_wlproxy(wlproxy);
 }
 
 #[test]
-fn filterway_block_interfaces_does_not_leak_fds() {
+fn wlproxy_block_interfaces_does_not_leak_fds() {
     use std::os::unix::io::AsRawFd;
     use uds::UnixStreamExt;
 
@@ -991,7 +991,7 @@ fn filterway_block_interfaces_does_not_leak_fds() {
     let mock_listener =
         std::os::unix::net::UnixListener::bind(dir.path().join("upstream.sock")).unwrap();
 
-    let (filterway, mut compositor, mut client) = spawn_filterway(
+    let (wlproxy, mut compositor, mut client) = spawn_wlproxy(
         &["--block", "zwlr_layer_shell_v1"],
         dir.path(),
         &mock_listener,
@@ -1083,16 +1083,16 @@ fn filterway_block_interfaces_does_not_leak_fds() {
     assert_eq!(proto::read_arg_uint(&mut cursor).unwrap(), 999);
 
     drop(dummy_recv);
-    cleanup_filterway(filterway);
+    cleanup_wlproxy(wlproxy);
 }
 
 #[test]
-fn filterway_block_interfaces_blocks_bind_requests() {
+fn wlproxy_block_interfaces_blocks_bind_requests() {
     let dir = tempdir().unwrap();
     let mock_listener =
         std::os::unix::net::UnixListener::bind(dir.path().join("upstream.sock")).unwrap();
 
-    let (filterway, mut compositor, mut client) = spawn_filterway(
+    let (wlproxy, mut compositor, mut client) = spawn_wlproxy(
         &["--block", "zwlr_layer_shell_v1"],
         dir.path(),
         &mock_listener,
@@ -1160,7 +1160,7 @@ fn filterway_block_interfaces_blocks_bind_requests() {
     );
 
     // 3. Client tries to bind zwlr_layer_shell_v1 (bypass attempt).
-    //    The bind includes the interface name — filterway should intercept it.
+    //    The bind includes the interface name — wlproxy should intercept it.
     let blocked_obj_id = 3u32;
     {
         let mut body = vec![];
@@ -1214,7 +1214,7 @@ fn filterway_block_interfaces_blocks_bind_requests() {
 
     // 6. Compositor should receive: get_registry, xdg_wm_base bind (NOT zwlr_layer_shell_v1 bind).
     // Wait — we already drained get_registry in step 1. So compositor's next read should be
-    // the xdg_wm_base bind (the zwlr_layer_shell_v1 bind was dropped by filterway).
+    // the xdg_wm_base bind (the zwlr_layer_shell_v1 bind was dropped by wlproxy).
     let compositor_received = read_packet(&mut compositor).unwrap().unwrap();
     assert_eq!(
         compositor_received.id, 2,
@@ -1234,7 +1234,7 @@ fn filterway_block_interfaces_blocks_bind_requests() {
         iface
     );
 
-    // 7. Client should receive the sentinel (confirming filterway still works normally).
+    // 7. Client should receive the sentinel (confirming wlproxy still works normally).
     let sentinel = read_packet(&mut client).unwrap().unwrap();
     assert_eq!(sentinel.id, 1);
     assert_eq!(sentinel.opcode, 1);
@@ -1273,16 +1273,16 @@ fn filterway_block_interfaces_blocks_bind_requests() {
     }
     let _ = read_packet(&mut compositor).unwrap().unwrap();
 
-    cleanup_filterway(filterway);
+    cleanup_wlproxy(wlproxy);
 }
 
 #[test]
-fn filterway_block_interfaces_drops_messages_to_blocked_object() {
+fn wlproxy_block_interfaces_drops_messages_to_blocked_object() {
     let dir = tempdir().unwrap();
     let mock_listener =
         std::os::unix::net::UnixListener::bind(dir.path().join("upstream.sock")).unwrap();
 
-    let (filterway, mut compositor, mut client) = spawn_filterway(
+    let (wlproxy, mut compositor, mut client) = spawn_wlproxy(
         &["--block", "zwlr_layer_shell_v1"],
         dir.path(),
         &mock_listener,
@@ -1304,7 +1304,7 @@ fn filterway_block_interfaces_drops_messages_to_blocked_object() {
     }
     let _ = read_packet(&mut compositor).unwrap().unwrap();
 
-    // 2. Client sends bind for zwlr_layer_shell_v1 — blocked by filterway.
+    // 2. Client sends bind for zwlr_layer_shell_v1 — blocked by wlproxy.
     //    (No globals announced — the malicious client is guessing type_id.)
     let blocked_obj_id = 3u32;
     {
@@ -1325,7 +1325,7 @@ fn filterway_block_interfaces_drops_messages_to_blocked_object() {
     }
 
     // 4. Client sends a message to the blocked object (e.g. a get_layer_surface request).
-    //    This should also be dropped by filterway.
+    //    This should also be dropped by wlproxy.
     {
         // zwlr_layer_shell_v1.get_layer_surface (opcode 0 for example).
         let mut body = vec![];
@@ -1365,17 +1365,17 @@ fn filterway_block_interfaces_drops_messages_to_blocked_object() {
     );
     assert_eq!(received.opcode, 0);
 
-    cleanup_filterway(filterway);
+    cleanup_wlproxy(wlproxy);
 }
 
 #[test]
-fn filterway_block_multiple_flags() {
+fn wlproxy_block_multiple_flags() {
     let dir = tempdir().unwrap();
     let mock_listener =
         std::os::unix::net::UnixListener::bind(dir.path().join("upstream.sock")).unwrap();
 
     // Pass --block twice with different values.
-    let (filterway, mut compositor, mut client) = spawn_filterway(
+    let (wlproxy, mut compositor, mut client) = spawn_wlproxy(
         &[
             "--block",
             "zwlr_layer_shell_v1",
@@ -1459,5 +1459,5 @@ fn filterway_block_multiple_flags() {
     assert_eq!(sentinel.id, 1);
     assert_eq!(sentinel.opcode, 1);
 
-    cleanup_filterway(filterway);
+    cleanup_wlproxy(wlproxy);
 }

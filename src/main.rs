@@ -17,9 +17,9 @@ use {
     },
 };
 
-use filterway::proto::{self, read_arg_string};
-use filterway::ObjType;
 use uds::UnixStreamExt;
+use wlproxy::proto::{self, read_arg_string};
+use wlproxy::ObjType;
 
 #[derive(Aargvark, Clone)]
 struct Args {
@@ -503,8 +503,8 @@ fn main() -> Result<(), String> {
         _ = remove_file(&args.downstream);
     });
 
-    // If the system booted with systemd, inform systemd that filterway is ready using
-    // notify. Other services that depend on filterway can start now.
+    // If the system booted with systemd, inform systemd that wlproxy is ready using
+    // notify. Other services that depend on wlproxy can start now.
     if let Ok(true) = sd_notify::booted() {
         if args.debug.is_some() {
             eprintln!("Init detected as being systemd. Notifying of readiness.");
