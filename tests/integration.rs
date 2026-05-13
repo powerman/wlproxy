@@ -1343,6 +1343,53 @@ fn wlproxy_block_interfaces_does_not_leak_fds() {
 }
 
 #[test]
+fn wlproxy_block_interfaces_and_title_prefix() {
+    let dir = tempdir().unwrap();
+    let mock_listener =
+        std::os::unix::net::UnixListener::bind(dir.path().join("upstream.sock")).unwrap();
+
+    // Block unrelated interfaces; title prefix should still work.
+    let (wlproxy, mut compositor, mut client) = spawn_wlproxy(
+        &[
+            "--title",
+            "pfx-",
+            "--prefix-title",
+            "--block",
+            "zwlr_layer_shell_v1",
+        ],
+        dir.path(),
+        &mock_listener,
+    );
+
+    build_object_chain(&mut client, &mut compositor);
+
+    // Send set_title and verify it's prefixed.
+    {
+        let mut body = vec![];
+        proto::write_arg_string(&mut body, "my-title").unwrap();
+        write_packet(
+            &mut client,
+            &Packet {
+                id: 5,
+                opcode: 2,
+                body,
+            },
+        )
+        .unwrap();
+    }
+    let modified = read_packet(&mut compositor).unwrap().unwrap();
+    let mut cursor = std::io::Cursor::new(&modified.body[..]);
+    let replaced = proto::read_arg_string(&mut cursor).unwrap();
+    assert_eq!(
+        replaced.as_deref(),
+        Some("pfx-my-title"),
+        "title prefix should work alongside interface blocking: got {replaced:?}"
+    );
+
+    cleanup_wlproxy(wlproxy);
+}
+
+#[test]
 fn wlproxy_block_interfaces_blocks_bind_requests() {
     let dir = tempdir().unwrap();
     let mock_listener =
