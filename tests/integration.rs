@@ -1,10 +1,8 @@
-use std::os::unix::net::{UnixListener, UnixStream};
-use std::path::PathBuf;
-use std::process::Command;
-use std::time::{Duration, Instant};
+use std::os::unix::net::UnixStream;
+use std::time::Duration;
 
-use tempfile::tempdir;
 use wlproxy::proto::{self, read_packet, write_packet, Packet};
+use wlproxy::{handle_connection, Args};
 
 // ---------------------------------------------------------------------------
 // Proto functions over a real UnixStream pair
@@ -91,9 +89,6 @@ fn large_packet_over_unix_stream() {
     let (mut a, mut b) = UnixStream::pair().unwrap();
     b.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
 
-    // Max body size: u16 message_size = body + 8 bytes header ≤ 65535.
-    // Write from a thread so the OS socket buffer (which may be as small as
-    // ~32KB on macOS) is drained concurrently by the main thread reading.
     let body = vec![0xABu8; 65527];
     let packet = Packet {
         id: u32::MAX,
@@ -114,123 +109,174 @@ fn large_packet_over_unix_stream() {
 }
 
 // ---------------------------------------------------------------------------
-// Binary passthrough (end-to-end)
+// Helpers for library-based wlproxy tests
 // ---------------------------------------------------------------------------
 
-fn wlproxy_binary() -> PathBuf {
-    std::env::var("CARGO_BIN_EXE_wlproxy")
-        .map(PathBuf::from)
-        .expect("wlproxy binary not found — run `cargo test` (CARGO_BIN_EXE_wlproxy is always set by cargo test)")
+fn send_pkt(s: &mut UnixStream, pkt: &Packet) {
+    write_packet(s, pkt).unwrap();
 }
 
-fn connect_with_retry(path: &std::path::Path, timeout: Duration) -> UnixStream {
-    let start = Instant::now();
-    loop {
-        match UnixStream::connect(path) {
-            Ok(stream) => return stream,
-            Err(_) if start.elapsed() >= timeout => {
-                panic!("timed out connecting to {}", path.display());
-            }
-            Err(_) => std::thread::sleep(Duration::from_millis(20)),
-        }
+fn recv_pkt(s: &mut UnixStream) -> Packet {
+    read_packet(s).unwrap().unwrap()
+}
+
+fn base_args(dir: &std::path::Path) -> Args {
+    Args {
+        upstream: None,
+        app_id: None,
+        prefix_app_id: false,
+        title: None,
+        prefix_title: false,
+        block: vec![],
+        quiet: true,
+        debug: false,
+        downstream: dir.join("dummy.sock"),
     }
 }
 
+/// Build the full Wayland object chain through handle_connection.
+fn build_object_chain(client: &mut UnixStream, compositor: &mut UnixStream) {
+    // 1. Display.get_registry (opcode=1) → Registry at id 2.
+    {
+        let mut b = vec![];
+        proto::write_arg_uint(&mut b, 2).unwrap();
+        send_pkt(
+            client,
+            &Packet {
+                id: 1,
+                opcode: 1,
+                body: b,
+            },
+        );
+    }
+    let _ = recv_pkt(compositor);
+
+    // 2. Compositor sends Registry.global for xdg_wm_base, type_id=0.
+    {
+        let mut body = vec![];
+        proto::write_arg_uint(&mut body, 0).unwrap();
+        proto::write_arg_string(&mut body, "xdg_wm_base").unwrap();
+        proto::write_arg_uint(&mut body, 1).unwrap();
+        send_pkt(
+            compositor,
+            &Packet {
+                id: 2,
+                opcode: 0,
+                body,
+            },
+        );
+    }
+    let _ = recv_pkt(client);
+
+    // 3. Client sends Registry.bind → xdg_wm_base at id 3.
+    {
+        let mut body = vec![];
+        proto::write_arg_uint(&mut body, 0).unwrap();
+        proto::write_arg_string(&mut body, "xdg_wm_base").unwrap();
+        proto::write_arg_uint(&mut body, 1).unwrap();
+        proto::write_arg_uint(&mut body, 3).unwrap();
+        send_pkt(
+            client,
+            &Packet {
+                id: 2,
+                opcode: 0,
+                body,
+            },
+        );
+    }
+    let _ = recv_pkt(compositor);
+
+    // 4. XdgWmBase.get_xdg_surface (opcode=2, id 3) → XdgSurface at id 4.
+    {
+        let mut b = vec![];
+        proto::write_arg_uint(&mut b, 4).unwrap();
+        send_pkt(
+            client,
+            &Packet {
+                id: 3,
+                opcode: 2,
+                body: b,
+            },
+        );
+    }
+    let _ = recv_pkt(compositor);
+
+    // 5. XdgSurface.create_toplevel (opcode=1, id 4) → XdgToplevel at id 5.
+    {
+        let mut b = vec![];
+        proto::write_arg_uint(&mut b, 5).unwrap();
+        send_pkt(
+            client,
+            &Packet {
+                id: 4,
+                opcode: 1,
+                body: b,
+            },
+        );
+    }
+    let _ = recv_pkt(compositor);
+}
+
+// ---------------------------------------------------------------------------
+// Basic passthrough (end-to-end)
+// ---------------------------------------------------------------------------
+
 #[test]
 fn wlproxy_basic_passthrough() {
-    let dir = tempdir().unwrap();
-    let upstream = dir.path().join("upstream.sock");
-    let downstream = dir.path().join("downstream.sock");
+    let dir = tempfile::tempdir().unwrap();
+    let (mut client, downstream) = UnixStream::pair().unwrap();
+    let (upstream, mut compositor) = UnixStream::pair().unwrap();
 
-    // Start mock compositor (listener for wlproxy's upstream connection).
-    let mock_listener = std::os::unix::net::UnixListener::bind(&upstream).unwrap();
+    for s in [&client, &compositor] {
+        s.set_read_timeout(Some(Duration::from_secs(2))).unwrap();
+    }
 
-    // Launch wlproxy.
-    let mut wlproxy = Command::new(wlproxy_binary())
-        .args([
-            "--upstream",
-            upstream.to_str().unwrap(),
-            downstream.to_str().unwrap(),
-        ])
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::piped())
-        .spawn()
-        .expect("failed to start wlproxy");
+    let args = base_args(dir.path());
+    handle_connection(downstream, upstream, &args);
 
-    // Connect as a client to wlproxy's downstream socket.
-    let mut client = connect_with_retry(&downstream, Duration::from_secs(5));
-
-    // Mock compositor accepts wlproxy's connection.
-    let (mut compositor, _) = mock_listener.accept().unwrap();
-
-    client
-        .set_read_timeout(Some(Duration::from_secs(2)))
-        .unwrap();
-    compositor
-        .set_read_timeout(Some(Duration::from_secs(2)))
-        .unwrap();
-
-    // Send message client → wlproxy → compositor.
+    // Send message client → compositor.
     let sent = Packet {
         id: 1,
         opcode: 0,
         body: vec![0xAB, 0xCD, 0x00, 0x00],
     };
-    write_packet(&mut client, &sent).unwrap();
-    let received = read_packet(&mut compositor).unwrap().unwrap();
+    send_pkt(&mut client, &sent);
+    let received = recv_pkt(&mut compositor);
     assert_eq!(received, sent, "client→compositor passthrough failed");
 
-    // Send message compositor → wlproxy → client.
-    // Use opcode=0 (no special handling on Display) with a non-empty body.
+    // Send message compositor → client.
     let reply = Packet {
         id: 1,
         opcode: 0,
         body: vec![0xAA],
     };
-    write_packet(&mut compositor, &reply).unwrap();
-    let received = read_packet(&mut client).unwrap().unwrap();
+    send_pkt(&mut compositor, &reply);
+    let received = recv_pkt(&mut client);
     assert_eq!(received, reply, "compositor→client passthrough failed");
-
-    // Cleanup.
-    wlproxy.kill().unwrap();
-    let output = wlproxy.wait_with_output().unwrap();
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        if !stderr.is_empty() {
-            eprintln!("wlproxy stderr:\n{stderr}");
-        }
-    }
 }
+
+// ---------------------------------------------------------------------------
+// Multiple concurrent connections
+// ---------------------------------------------------------------------------
 
 #[test]
 fn wlproxy_multiple_concurrent_connections() {
-    let dir = tempdir().unwrap();
-    let upstream = dir.path().join("upstream.sock");
-    let downstream = dir.path().join("downstream.sock");
-    let mock_listener = std::os::unix::net::UnixListener::bind(&upstream).unwrap();
+    let dir = tempfile::tempdir().unwrap();
 
-    // Start wlproxy.
-    let mut wlproxy = Command::new(wlproxy_binary())
-        .args([
-            "--upstream",
-            upstream.to_str().unwrap(),
-            downstream.to_str().unwrap(),
-        ])
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::piped())
-        .spawn()
-        .expect("failed to start wlproxy");
+    // Connection 1
+    let (mut client1, downstream1) = UnixStream::pair().unwrap();
+    let (upstream1, mut compositor1) = UnixStream::pair().unwrap();
+    // Connection 2
+    let (mut client2, downstream2) = UnixStream::pair().unwrap();
+    let (upstream2, mut compositor2) = UnixStream::pair().unwrap();
 
-    // Connect two clients and accept their upstream connections.
-    let mut client1 = connect_with_retry(&downstream, Duration::from_secs(5));
-    let (mut compositor1, _) = mock_listener.accept().unwrap();
-
-    let mut client2 = connect_with_retry(&downstream, Duration::from_secs(5));
-    let (mut compositor2, _) = mock_listener.accept().unwrap();
-
-    for c in [&client1, &client2, &compositor1, &compositor2] {
-        c.set_read_timeout(Some(Duration::from_secs(2))).unwrap();
+    for s in [&client1, &client2, &compositor1, &compositor2] {
+        s.set_read_timeout(Some(Duration::from_secs(2))).unwrap();
     }
+
+    let args = base_args(dir.path());
+    handle_connection(downstream1, upstream1, &args);
+    handle_connection(downstream2, upstream2, &args);
 
     // Send message client1 → compositor1.
     let msg1 = Packet {
@@ -238,12 +284,8 @@ fn wlproxy_multiple_concurrent_connections() {
         opcode: 0,
         body: vec![0x11, 0x22, 0x00, 0x00],
     };
-    write_packet(&mut client1, &msg1).unwrap();
-    assert_eq!(
-        read_packet(&mut compositor1).unwrap().unwrap(),
-        msg1,
-        "client1 → compositor1"
-    );
+    send_pkt(&mut client1, &msg1);
+    assert_eq!(recv_pkt(&mut compositor1), msg1, "client1 → compositor1");
 
     // Send message client2 → compositor2.
     let msg2 = Packet {
@@ -251,12 +293,8 @@ fn wlproxy_multiple_concurrent_connections() {
         opcode: 0,
         body: vec![0x33, 0x44, 0x00, 0x00],
     };
-    write_packet(&mut client2, &msg2).unwrap();
-    assert_eq!(
-        read_packet(&mut compositor2).unwrap().unwrap(),
-        msg2,
-        "client2 → compositor2"
-    );
+    send_pkt(&mut client2, &msg2);
+    assert_eq!(recv_pkt(&mut compositor2), msg2, "client2 → compositor2");
 
     // Send message compositor1 → client1.
     let reply1 = Packet {
@@ -264,12 +302,8 @@ fn wlproxy_multiple_concurrent_connections() {
         opcode: 0,
         body: vec![0xAA],
     };
-    write_packet(&mut compositor1, &reply1).unwrap();
-    assert_eq!(
-        read_packet(&mut client1).unwrap().unwrap(),
-        reply1,
-        "compositor1 → client1"
-    );
+    send_pkt(&mut compositor1, &reply1);
+    assert_eq!(recv_pkt(&mut client1), reply1, "compositor1 → client1");
 
     // Send message compositor2 → client2.
     let reply2 = Packet {
@@ -277,190 +311,45 @@ fn wlproxy_multiple_concurrent_connections() {
         opcode: 0,
         body: vec![0xBB],
     };
-    write_packet(&mut compositor2, &reply2).unwrap();
-    assert_eq!(
-        read_packet(&mut client2).unwrap().unwrap(),
-        reply2,
-        "compositor2 → client2"
-    );
-
-    // Cleanup.
-    wlproxy.kill().unwrap();
-    let _ = wlproxy.wait_with_output();
+    send_pkt(&mut compositor2, &reply2);
+    assert_eq!(recv_pkt(&mut client2), reply2, "compositor2 → client2");
 }
 
 // ---------------------------------------------------------------------------
-// Helpers for wlproxy end-to-end tests
+// Object chain + app_id / title tests
 // ---------------------------------------------------------------------------
-
-/// Spawn wlproxy with the given extra args (beyond --upstream)
-/// and accept its upstream connection against the mock listener.
-/// Returns (wlproxy_child, compositor_stream, client_stream).
-fn spawn_wlproxy(
-    extra_args: &[&str],
-    dir: &std::path::Path,
-    mock_listener: &UnixListener,
-) -> (std::process::Child, UnixStream, UnixStream) {
-    let upstream = dir.join("upstream.sock");
-    let downstream = dir.join("downstream.sock");
-
-    let wlproxy = Command::new(wlproxy_binary())
-        .args([
-            "--upstream",
-            upstream.to_str().unwrap(),
-            downstream.to_str().unwrap(),
-        ])
-        .args(extra_args)
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::piped())
-        .spawn()
-        .expect("failed to start wlproxy");
-
-    let client = connect_with_retry(&downstream, Duration::from_secs(5));
-
-    let (compositor, _) = mock_listener.accept().unwrap();
-
-    client
-        .set_read_timeout(Some(Duration::from_secs(2)))
-        .unwrap();
-    compositor
-        .set_read_timeout(Some(Duration::from_secs(2)))
-        .unwrap();
-
-    (wlproxy, compositor, client)
-}
-
-/// Send the standard Wayland object-chain messages that make wlproxy
-/// recognise a new XdgToplevel, **and forward each request to compositor**
-/// (reading it from client before the compositor would normally see it).
-///
-/// Returns the client itself so callers can continue sending messages.
-fn build_object_chain(client: &mut UnixStream, compositor: &mut UnixStream) {
-    // 1. Display.get_registry (opcode=1) → creates registry at id 2.
-    write_packet(
-        client,
-        &Packet {
-            id: 1,
-            opcode: 1,
-            body: {
-                let mut b = vec![];
-                proto::write_arg_uint(&mut b, 2).unwrap();
-                b
-            },
-        },
-    )
-    .unwrap();
-    let _ = read_packet(compositor).unwrap().unwrap();
-
-    // 2. Compositor sends Registry.global (opcode=0) for xdg_wm_base, type_id=0.
-    {
-        let mut body = vec![];
-        proto::write_arg_uint(&mut body, 0).unwrap();
-        proto::write_arg_string(&mut body, "xdg_wm_base").unwrap();
-        proto::write_arg_uint(&mut body, 1).unwrap();
-        write_packet(
-            compositor,
-            &Packet {
-                id: 2,
-                opcode: 0,
-                body,
-            },
-        )
-        .unwrap();
-    }
-    let _ = read_packet(client).unwrap().unwrap();
-
-    // 3. Client sends Registry.bind (opcode=0, id 2) → binds xdg_wm_base at id 3.
-    {
-        let mut body = vec![];
-        proto::write_arg_uint(&mut body, 0).unwrap();
-        proto::write_arg_string(&mut body, "xdg_wm_base").unwrap();
-        proto::write_arg_uint(&mut body, 1).unwrap();
-        proto::write_arg_uint(&mut body, 3).unwrap();
-        write_packet(
-            client,
-            &Packet {
-                id: 2,
-                opcode: 0,
-                body,
-            },
-        )
-        .unwrap();
-    }
-    let _ = read_packet(compositor).unwrap().unwrap();
-
-    // 4. XdgWmBase.get_xdg_surface (opcode=2, id 3) → surface at id 4.
-    {
-        let mut body = vec![];
-        proto::write_arg_uint(&mut body, 4).unwrap();
-        write_packet(
-            client,
-            &Packet {
-                id: 3,
-                opcode: 2,
-                body,
-            },
-        )
-        .unwrap();
-    }
-    let _ = read_packet(compositor).unwrap().unwrap();
-
-    // 5. XdgSurface.create_toplevel (opcode=1, id 4) → toplevel at id 5.
-    {
-        let mut body = vec![];
-        proto::write_arg_uint(&mut body, 5).unwrap();
-        write_packet(
-            client,
-            &Packet {
-                id: 4,
-                opcode: 1,
-                body,
-            },
-        )
-        .unwrap();
-    }
-    let _ = read_packet(compositor).unwrap().unwrap();
-}
-
-/// Kill the wlproxy child and print stderr if the exit code is non-zero.
-fn cleanup_wlproxy(mut wlproxy: std::process::Child) {
-    wlproxy.kill().unwrap();
-    let output = wlproxy.wait_with_output().unwrap();
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        if !stderr.is_empty() {
-            eprintln!("wlproxy stderr:\n{stderr}");
-        }
-    }
-}
 
 #[test]
 fn wlproxy_object_chain_and_app_id_replacement() {
-    let dir = tempdir().unwrap();
-    let mock_listener =
-        std::os::unix::net::UnixListener::bind(dir.path().join("upstream.sock")).unwrap();
+    let dir = tempfile::tempdir().unwrap();
+    let (mut client, downstream) = UnixStream::pair().unwrap();
+    let (upstream, mut compositor) = UnixStream::pair().unwrap();
 
-    let (wlproxy, mut compositor, mut client) =
-        spawn_wlproxy(&["--app-id", "filtered"], dir.path(), &mock_listener);
+    for s in [&client, &compositor] {
+        s.set_read_timeout(Some(Duration::from_secs(2))).unwrap();
+    }
+
+    let args = Args {
+        app_id: Some("filtered".to_string()),
+        ..base_args(dir.path())
+    };
+    handle_connection(downstream, upstream, &args);
 
     build_object_chain(&mut client, &mut compositor);
 
-    // Client sends XdgToplevel.set_app_id (opcode=3, id 5) with original app_id "my-app".
-    {
-        let mut body = vec![];
-        proto::write_arg_string(&mut body, "my-app").unwrap();
-        write_packet(
-            &mut client,
-            &Packet {
-                id: 5,
-                opcode: 3,
-                body,
-            },
-        )
-        .unwrap();
-    }
-    let modified = read_packet(&mut compositor).unwrap().unwrap();
+    // Client sends XdgToplevel.set_app_id (opcode=3, id 5).
+    let mut body = vec![];
+    proto::write_arg_string(&mut body, "my-app").unwrap();
+    send_pkt(
+        &mut client,
+        &Packet {
+            id: 5,
+            opcode: 3,
+            body,
+        },
+    );
 
+    let modified = recv_pkt(&mut compositor);
     let mut cursor = std::io::Cursor::new(&modified.body[..]);
     let replaced = proto::read_arg_string(&mut cursor).unwrap();
     assert_eq!(
@@ -468,37 +357,39 @@ fn wlproxy_object_chain_and_app_id_replacement() {
         Some("filtered"),
         "app_id replacement failed: got {replaced:?}"
     );
-
-    cleanup_wlproxy(wlproxy);
 }
 
 #[test]
 fn wlproxy_title_replacement() {
-    let dir = tempdir().unwrap();
-    let mock_listener =
-        std::os::unix::net::UnixListener::bind(dir.path().join("upstream.sock")).unwrap();
+    let dir = tempfile::tempdir().unwrap();
+    let (mut client, downstream) = UnixStream::pair().unwrap();
+    let (upstream, mut compositor) = UnixStream::pair().unwrap();
 
-    let (wlproxy, mut compositor, mut client) =
-        spawn_wlproxy(&["--title", "filtered-title"], dir.path(), &mock_listener);
+    for s in [&client, &compositor] {
+        s.set_read_timeout(Some(Duration::from_secs(2))).unwrap();
+    }
+
+    let args = Args {
+        title: Some("filtered-title".to_string()),
+        ..base_args(dir.path())
+    };
+    handle_connection(downstream, upstream, &args);
 
     build_object_chain(&mut client, &mut compositor);
 
-    // Client sends XdgToplevel.set_title (opcode=2, id 5) with original title "my-title".
-    {
-        let mut body = vec![];
-        proto::write_arg_string(&mut body, "my-title").unwrap();
-        write_packet(
-            &mut client,
-            &Packet {
-                id: 5,
-                opcode: 2,
-                body,
-            },
-        )
-        .unwrap();
-    }
-    let modified = read_packet(&mut compositor).unwrap().unwrap();
+    // Client sends XdgToplevel.set_title (opcode=2, id 5).
+    let mut body = vec![];
+    proto::write_arg_string(&mut body, "my-title").unwrap();
+    send_pkt(
+        &mut client,
+        &Packet {
+            id: 5,
+            opcode: 2,
+            body,
+        },
+    );
 
+    let modified = recv_pkt(&mut compositor);
     let mut cursor = std::io::Cursor::new(&modified.body[..]);
     let replaced = proto::read_arg_string(&mut cursor).unwrap();
     assert_eq!(
@@ -506,40 +397,39 @@ fn wlproxy_title_replacement() {
         Some("filtered-title"),
         "title replacement failed: got {replaced:?}"
     );
-
-    cleanup_wlproxy(wlproxy);
 }
 
 #[test]
 fn wlproxy_app_id_prefix() {
-    let dir = tempdir().unwrap();
-    let mock_listener =
-        std::os::unix::net::UnixListener::bind(dir.path().join("upstream.sock")).unwrap();
+    let dir = tempfile::tempdir().unwrap();
+    let (mut client, downstream) = UnixStream::pair().unwrap();
+    let (upstream, mut compositor) = UnixStream::pair().unwrap();
 
-    let (wlproxy, mut compositor, mut client) = spawn_wlproxy(
-        &["--app-id", "pfx-", "--prefix-app-id"],
-        dir.path(),
-        &mock_listener,
-    );
+    for s in [&client, &compositor] {
+        s.set_read_timeout(Some(Duration::from_secs(2))).unwrap();
+    }
+
+    let args = Args {
+        app_id: Some("pfx-".to_string()),
+        prefix_app_id: true,
+        ..base_args(dir.path())
+    };
+    handle_connection(downstream, upstream, &args);
 
     build_object_chain(&mut client, &mut compositor);
 
-    // Client sends XdgToplevel.set_app_id (opcode=3) with original app_id "my-app".
-    {
-        let mut body = vec![];
-        proto::write_arg_string(&mut body, "my-app").unwrap();
-        write_packet(
-            &mut client,
-            &Packet {
-                id: 5,
-                opcode: 3,
-                body,
-            },
-        )
-        .unwrap();
-    }
-    let modified = read_packet(&mut compositor).unwrap().unwrap();
+    let mut body = vec![];
+    proto::write_arg_string(&mut body, "my-app").unwrap();
+    send_pkt(
+        &mut client,
+        &Packet {
+            id: 5,
+            opcode: 3,
+            body,
+        },
+    );
 
+    let modified = recv_pkt(&mut compositor);
     let mut cursor = std::io::Cursor::new(&modified.body[..]);
     let replaced = proto::read_arg_string(&mut cursor).unwrap();
     assert_eq!(
@@ -547,36 +437,38 @@ fn wlproxy_app_id_prefix() {
         Some("pfx-my-app"),
         "app_id prefix failed: got {replaced:?}"
     );
-
-    cleanup_wlproxy(wlproxy);
 }
 
 #[test]
 fn wlproxy_empty_app_id() {
-    let dir = tempdir().unwrap();
-    let mock_listener =
-        std::os::unix::net::UnixListener::bind(dir.path().join("upstream.sock")).unwrap();
+    let dir = tempfile::tempdir().unwrap();
+    let (mut client, downstream) = UnixStream::pair().unwrap();
+    let (upstream, mut compositor) = UnixStream::pair().unwrap();
 
-    let (wlproxy, mut compositor, mut client) =
-        spawn_wlproxy(&["--app-id", "fallback"], dir.path(), &mock_listener);
+    for s in [&client, &compositor] {
+        s.set_read_timeout(Some(Duration::from_secs(2))).unwrap();
+    }
+
+    let args = Args {
+        app_id: Some("fallback".to_string()),
+        ..base_args(dir.path())
+    };
+    handle_connection(downstream, upstream, &args);
 
     build_object_chain(&mut client, &mut compositor);
 
-    // Client sends set_app_id with empty string.
-    {
-        let mut body = vec![];
-        proto::write_arg_string(&mut body, "").unwrap();
-        write_packet(
-            &mut client,
-            &Packet {
-                id: 5,
-                opcode: 3,
-                body,
-            },
-        )
-        .unwrap();
-    }
-    let modified = read_packet(&mut compositor).unwrap().unwrap();
+    let mut body = vec![];
+    proto::write_arg_string(&mut body, "").unwrap();
+    send_pkt(
+        &mut client,
+        &Packet {
+            id: 5,
+            opcode: 3,
+            body,
+        },
+    );
+
+    let modified = recv_pkt(&mut compositor);
     let mut cursor = std::io::Cursor::new(&modified.body[..]);
     let replaced = proto::read_arg_string(&mut cursor).unwrap();
     assert_eq!(
@@ -584,39 +476,39 @@ fn wlproxy_empty_app_id() {
         Some("fallback"),
         "empty app_id should be replaced: got {replaced:?}"
     );
-
-    cleanup_wlproxy(wlproxy);
 }
 
 #[test]
 fn wlproxy_empty_title_prefix() {
-    let dir = tempdir().unwrap();
-    let mock_listener =
-        std::os::unix::net::UnixListener::bind(dir.path().join("upstream.sock")).unwrap();
+    let dir = tempfile::tempdir().unwrap();
+    let (mut client, downstream) = UnixStream::pair().unwrap();
+    let (upstream, mut compositor) = UnixStream::pair().unwrap();
 
-    let (wlproxy, mut compositor, mut client) = spawn_wlproxy(
-        &["--title", "pfx-", "--prefix-title"],
-        dir.path(),
-        &mock_listener,
-    );
+    for s in [&client, &compositor] {
+        s.set_read_timeout(Some(Duration::from_secs(2))).unwrap();
+    }
+
+    let args = Args {
+        title: Some("pfx-".to_string()),
+        prefix_title: true,
+        ..base_args(dir.path())
+    };
+    handle_connection(downstream, upstream, &args);
 
     build_object_chain(&mut client, &mut compositor);
 
-    // Client sends set_title with empty string.
-    {
-        let mut body = vec![];
-        proto::write_arg_string(&mut body, "").unwrap();
-        write_packet(
-            &mut client,
-            &Packet {
-                id: 5,
-                opcode: 2,
-                body,
-            },
-        )
-        .unwrap();
-    }
-    let modified = read_packet(&mut compositor).unwrap().unwrap();
+    let mut body = vec![];
+    proto::write_arg_string(&mut body, "").unwrap();
+    send_pkt(
+        &mut client,
+        &Packet {
+            id: 5,
+            opcode: 2,
+            body,
+        },
+    );
+
+    let modified = recv_pkt(&mut compositor);
     let mut cursor = std::io::Cursor::new(&modified.body[..]);
     let replaced = proto::read_arg_string(&mut cursor).unwrap();
     assert_eq!(
@@ -624,40 +516,39 @@ fn wlproxy_empty_title_prefix() {
         Some("pfx-"),
         "empty title should be prefixed: got {replaced:?}"
     );
-
-    cleanup_wlproxy(wlproxy);
 }
 
 #[test]
 fn wlproxy_title_prefix() {
-    let dir = tempdir().unwrap();
-    let mock_listener =
-        std::os::unix::net::UnixListener::bind(dir.path().join("upstream.sock")).unwrap();
+    let dir = tempfile::tempdir().unwrap();
+    let (mut client, downstream) = UnixStream::pair().unwrap();
+    let (upstream, mut compositor) = UnixStream::pair().unwrap();
 
-    let (wlproxy, mut compositor, mut client) = spawn_wlproxy(
-        &["--title", "pfx-", "--prefix-title"],
-        dir.path(),
-        &mock_listener,
-    );
+    for s in [&client, &compositor] {
+        s.set_read_timeout(Some(Duration::from_secs(2))).unwrap();
+    }
+
+    let args = Args {
+        title: Some("pfx-".to_string()),
+        prefix_title: true,
+        ..base_args(dir.path())
+    };
+    handle_connection(downstream, upstream, &args);
 
     build_object_chain(&mut client, &mut compositor);
 
-    // Client sends XdgToplevel.set_title (opcode=2) with original title "my-title".
-    {
-        let mut body = vec![];
-        proto::write_arg_string(&mut body, "my-title").unwrap();
-        write_packet(
-            &mut client,
-            &Packet {
-                id: 5,
-                opcode: 2,
-                body,
-            },
-        )
-        .unwrap();
-    }
-    let modified = read_packet(&mut compositor).unwrap().unwrap();
+    let mut body = vec![];
+    proto::write_arg_string(&mut body, "my-title").unwrap();
+    send_pkt(
+        &mut client,
+        &Packet {
+            id: 5,
+            opcode: 2,
+            body,
+        },
+    );
 
+    let modified = recv_pkt(&mut compositor);
     let mut cursor = std::io::Cursor::new(&modified.body[..]);
     let replaced = proto::read_arg_string(&mut cursor).unwrap();
     assert_eq!(
@@ -665,8 +556,6 @@ fn wlproxy_title_prefix() {
         Some("pfx-my-title"),
         "title prefix failed: got {replaced:?}"
     );
-
-    cleanup_wlproxy(wlproxy);
 }
 
 // ---------------------------------------------------------------------------
@@ -675,48 +564,49 @@ fn wlproxy_title_prefix() {
 
 #[test]
 fn wlproxy_delete_id() {
-    let dir = tempdir().unwrap();
-    let mock_listener =
-        std::os::unix::net::UnixListener::bind(dir.path().join("upstream.sock")).unwrap();
+    let dir = tempfile::tempdir().unwrap();
+    let (mut client, downstream) = UnixStream::pair().unwrap();
+    let (upstream, mut compositor) = UnixStream::pair().unwrap();
 
-    let (wlproxy, mut compositor, mut client) =
-        spawn_wlproxy(&["--app-id", "filtered"], dir.path(), &mock_listener);
+    for s in [&client, &compositor] {
+        s.set_read_timeout(Some(Duration::from_secs(2))).unwrap();
+    }
+
+    let args = Args {
+        app_id: Some("filtered".to_string()),
+        ..base_args(dir.path())
+    };
+    handle_connection(downstream, upstream, &args);
 
     build_object_chain(&mut client, &mut compositor);
 
     // Compositor sends Display.delete_id for obj 5 (XdgToplevel).
-    {
-        let mut body = vec![];
-        proto::write_arg_uint(&mut body, 5).unwrap();
-        write_packet(
-            &mut compositor,
-            &Packet {
-                id: 1,
-                opcode: 1,
-                body,
-            },
-        )
-        .unwrap();
-    }
-    // Client drains the forwarded delete_id (server→client thread removes obj 5 first).
-    let _ = read_packet(&mut client).unwrap().unwrap();
+    let mut body = vec![];
+    proto::write_arg_uint(&mut body, 5).unwrap();
+    send_pkt(
+        &mut compositor,
+        &Packet {
+            id: 1,
+            opcode: 1,
+            body,
+        },
+    );
+    let _ = recv_pkt(&mut client);
 
-    // Client sends set_app_id for obj 5 → should passthrough UNMODIFIED
+    // Client sends set_app_id for obj 5 → passthrough UNMODIFIED
     // because obj 5 is no longer tracked.
-    {
-        let mut body = vec![];
-        proto::write_arg_string(&mut body, "my-app").unwrap();
-        write_packet(
-            &mut client,
-            &Packet {
-                id: 5,
-                opcode: 3,
-                body,
-            },
-        )
-        .unwrap();
-    }
-    let received = read_packet(&mut compositor).unwrap().unwrap();
+    let mut body = vec![];
+    proto::write_arg_string(&mut body, "my-app").unwrap();
+    send_pkt(
+        &mut client,
+        &Packet {
+            id: 5,
+            opcode: 3,
+            body,
+        },
+    );
+
+    let received = recv_pkt(&mut compositor);
     let mut cursor = std::io::Cursor::new(&received.body[..]);
     let app_id = proto::read_arg_string(&mut cursor).unwrap();
     assert_eq!(
@@ -724,34 +614,38 @@ fn wlproxy_delete_id() {
         Some("my-app"),
         "set_app_id should pass through unmodified after delete_id: got {app_id:?}"
     );
-
-    cleanup_wlproxy(wlproxy);
 }
 
 #[test]
 fn wlproxy_delete_id_registry() {
-    let dir = tempdir().unwrap();
-    let mock_listener =
-        std::os::unix::net::UnixListener::bind(dir.path().join("upstream.sock")).unwrap();
+    let dir = tempfile::tempdir().unwrap();
+    let (mut client, downstream) = UnixStream::pair().unwrap();
+    let (upstream, mut compositor) = UnixStream::pair().unwrap();
 
-    let (wlproxy, mut compositor, mut client) =
-        spawn_wlproxy(&["--app-id", "filtered"], dir.path(), &mock_listener);
+    for s in [&client, &compositor] {
+        s.set_read_timeout(Some(Duration::from_secs(2))).unwrap();
+    }
+
+    let args = Args {
+        app_id: Some("filtered".to_string()),
+        ..base_args(dir.path())
+    };
+    handle_connection(downstream, upstream, &args);
 
     // 1. Client sends Display.get_registry (opcode=1, id 1) → Registry at id 2.
     {
         let mut body = vec![];
         proto::write_arg_uint(&mut body, 2).unwrap();
-        write_packet(
+        send_pkt(
             &mut client,
             &Packet {
                 id: 1,
                 opcode: 1,
                 body,
             },
-        )
-        .unwrap();
+        );
     }
-    let _ = read_packet(&mut compositor).unwrap().unwrap();
+    let _ = recv_pkt(&mut compositor);
 
     // 2. Compositor sends globals on registry (id 2), including xdg_wm_base.
     {
@@ -759,69 +653,63 @@ fn wlproxy_delete_id_registry() {
         proto::write_arg_uint(&mut body, 0).unwrap();
         proto::write_arg_string(&mut body, "xdg_wm_base").unwrap();
         proto::write_arg_uint(&mut body, 6).unwrap();
-        write_packet(
+        send_pkt(
             &mut compositor,
             &Packet {
                 id: 2,
                 opcode: 0,
                 body,
             },
-        )
-        .unwrap();
+        );
     }
-    let _ = read_packet(&mut client).unwrap().unwrap();
+    let _ = recv_pkt(&mut client);
 
     // 3. Compositor deletes registry (id 2).
     {
         let mut body = vec![];
         proto::write_arg_uint(&mut body, 2).unwrap();
-        write_packet(
+        send_pkt(
             &mut compositor,
             &Packet {
                 id: 1,
                 opcode: 1,
                 body,
             },
-        )
-        .unwrap();
+        );
     }
-    let _ = read_packet(&mut client).unwrap().unwrap();
+    let _ = recv_pkt(&mut client);
 
     // 4. Client sends get_registry again → new Registry at id 3.
     {
         let mut body = vec![];
         proto::write_arg_uint(&mut body, 3).unwrap();
-        write_packet(
+        send_pkt(
             &mut client,
             &Packet {
                 id: 1,
                 opcode: 1,
                 body,
             },
-        )
-        .unwrap();
+        );
     }
-    let _ = read_packet(&mut compositor).unwrap().unwrap();
+    let _ = recv_pkt(&mut compositor);
 
     // 5. Compositor sends global on new registry (id 3) for wl_compositor.
-    //    This validates that cache_reg_id was cleared — otherwise
-    //    the global would be ignored because it's on id 3, not cached id 2.
     {
         let mut body = vec![];
         proto::write_arg_uint(&mut body, 0).unwrap();
         proto::write_arg_string(&mut body, "wl_compositor").unwrap();
         proto::write_arg_uint(&mut body, 4).unwrap();
-        write_packet(
+        send_pkt(
             &mut compositor,
             &Packet {
                 id: 3,
                 opcode: 0,
                 body,
             },
-        )
-        .unwrap();
+        );
     }
-    let p = read_packet(&mut client).unwrap().unwrap();
+    let p = recv_pkt(&mut client);
     assert_eq!(p.id, 3, "global should arrive on new registry id 3");
     assert_eq!(p.opcode, 0);
     let mut cursor = std::io::Cursor::new(&p.body);
@@ -832,8 +720,6 @@ fn wlproxy_delete_id_registry() {
         Some("wl_compositor"),
         "global should be forwarded on new registry"
     );
-
-    cleanup_wlproxy(wlproxy);
 }
 
 // ---------------------------------------------------------------------------
@@ -842,85 +728,86 @@ fn wlproxy_delete_id_registry() {
 
 #[test]
 fn wlproxy_global_filtering() {
-    let dir = tempdir().unwrap();
-    let mock_listener =
-        std::os::unix::net::UnixListener::bind(dir.path().join("upstream.sock")).unwrap();
+    let dir = tempfile::tempdir().unwrap();
+    let (mut client, downstream) = UnixStream::pair().unwrap();
+    let (upstream, mut compositor) = UnixStream::pair().unwrap();
 
-    let (wlproxy, mut compositor, mut client) =
-        spawn_wlproxy(&["--app-id", "filtered"], dir.path(), &mock_listener);
+    for s in [&client, &compositor] {
+        s.set_read_timeout(Some(Duration::from_secs(2))).unwrap();
+    }
 
-    // ---- Custom object chain with multiple globals ----
+    let args = Args {
+        app_id: Some("filtered".to_string()),
+        ..base_args(dir.path())
+    };
+    handle_connection(downstream, upstream, &args);
 
-    // 0. Client sends Display.get_registry (opcode=1, id 1) → Registry at id 2.
+    // 0. Display.get_registry → Registry at id 2.
     {
         let mut body = vec![];
         proto::write_arg_uint(&mut body, 2).unwrap();
-        write_packet(
+        send_pkt(
             &mut client,
             &Packet {
                 id: 1,
                 opcode: 1,
                 body,
             },
-        )
-        .unwrap();
+        );
     }
-    let _ = read_packet(&mut compositor).unwrap().unwrap();
+    let _ = recv_pkt(&mut compositor);
 
-    // 1. Compositor sends global for wl_compositor (NOT xdg_wm_base, type_id=0).
+    // 1. Global for wl_compositor (NOT xdg_wm_base, type_id=0).
     {
         let mut body = vec![];
         proto::write_arg_uint(&mut body, 0).unwrap();
         proto::write_arg_string(&mut body, "wl_compositor").unwrap();
         proto::write_arg_uint(&mut body, 4).unwrap();
-        write_packet(
+        send_pkt(
             &mut compositor,
             &Packet {
                 id: 2,
                 opcode: 0,
                 body,
             },
-        )
-        .unwrap();
+        );
     }
-    let _ = read_packet(&mut client).unwrap().unwrap();
+    let _ = recv_pkt(&mut client);
 
-    // 2. Compositor sends global for xdg_wm_base (type_id=1).
+    // 2. Global for xdg_wm_base (type_id=1).
     {
         let mut body = vec![];
         proto::write_arg_uint(&mut body, 1).unwrap();
         proto::write_arg_string(&mut body, "xdg_wm_base").unwrap();
         proto::write_arg_uint(&mut body, 6).unwrap();
-        write_packet(
+        send_pkt(
             &mut compositor,
             &Packet {
                 id: 2,
                 opcode: 0,
                 body,
             },
-        )
-        .unwrap();
+        );
     }
-    let _ = read_packet(&mut client).unwrap().unwrap();
+    let _ = recv_pkt(&mut client);
 
-    // 3. Client binds wl_compositor (type_id=0) → obj 3 (NOT tracked, wrong type_id).
+    // 3. Client binds wl_compositor (type_id=0) → obj 3 (NOT tracked).
     {
         let mut body = vec![];
         proto::write_arg_uint(&mut body, 0).unwrap();
         proto::write_arg_string(&mut body, "wl_compositor").unwrap();
         proto::write_arg_uint(&mut body, 4).unwrap();
         proto::write_arg_uint(&mut body, 3).unwrap();
-        write_packet(
+        send_pkt(
             &mut client,
             &Packet {
                 id: 2,
                 opcode: 0,
                 body,
             },
-        )
-        .unwrap();
+        );
     }
-    let _ = read_packet(&mut compositor).unwrap().unwrap();
+    let _ = recv_pkt(&mut compositor);
 
     // 4. Client binds xdg_wm_base (type_id=1) → obj 4 (SHOULD be tracked).
     {
@@ -929,66 +816,62 @@ fn wlproxy_global_filtering() {
         proto::write_arg_string(&mut body, "xdg_wm_base").unwrap();
         proto::write_arg_uint(&mut body, 6).unwrap();
         proto::write_arg_uint(&mut body, 4).unwrap();
-        write_packet(
+        send_pkt(
             &mut client,
             &Packet {
                 id: 2,
                 opcode: 0,
                 body,
             },
-        )
-        .unwrap();
+        );
     }
-    let _ = read_packet(&mut compositor).unwrap().unwrap();
+    let _ = recv_pkt(&mut compositor);
 
     // 5. XdgWmBase.get_xdg_surface (opcode=2, id 4) → surface at id 5.
     {
-        let mut body = vec![];
-        proto::write_arg_uint(&mut body, 5).unwrap();
-        write_packet(
+        let mut b = vec![];
+        proto::write_arg_uint(&mut b, 5).unwrap();
+        send_pkt(
             &mut client,
             &Packet {
                 id: 4,
                 opcode: 2,
-                body,
+                body: b,
             },
-        )
-        .unwrap();
+        );
     }
-    let _ = read_packet(&mut compositor).unwrap().unwrap();
+    let _ = recv_pkt(&mut compositor);
 
     // 6. XdgSurface.create_toplevel (opcode=1, id 5) → toplevel at id 6.
     {
-        let mut body = vec![];
-        proto::write_arg_uint(&mut body, 6).unwrap();
-        write_packet(
+        let mut b = vec![];
+        proto::write_arg_uint(&mut b, 6).unwrap();
+        send_pkt(
             &mut client,
             &Packet {
                 id: 5,
                 opcode: 1,
-                body,
+                body: b,
             },
-        )
-        .unwrap();
+        );
     }
-    let _ = read_packet(&mut compositor).unwrap().unwrap();
+    let _ = recv_pkt(&mut compositor);
 
     // 7. set_app_id on obj 3 (NOT tracked) → passthrough UNMODIFIED.
     {
         let mut body = vec![];
         proto::write_arg_string(&mut body, "my-app-3").unwrap();
-        write_packet(
+        send_pkt(
             &mut client,
             &Packet {
                 id: 3,
                 opcode: 3,
                 body,
             },
-        )
-        .unwrap();
+        );
     }
     {
-        let received = read_packet(&mut compositor).unwrap().unwrap();
+        let received = recv_pkt(&mut compositor);
         let mut cursor = std::io::Cursor::new(&received.body[..]);
         let app_id = proto::read_arg_string(&mut cursor).unwrap();
         assert_eq!(
@@ -1002,18 +885,17 @@ fn wlproxy_global_filtering() {
     {
         let mut body = vec![];
         proto::write_arg_string(&mut body, "some-app").unwrap();
-        write_packet(
+        send_pkt(
             &mut client,
             &Packet {
                 id: 6,
                 opcode: 3,
                 body,
             },
-        )
-        .unwrap();
+        );
     }
     {
-        let received = read_packet(&mut compositor).unwrap().unwrap();
+        let received = recv_pkt(&mut compositor);
         let mut cursor = std::io::Cursor::new(&received.body[..]);
         let app_id = proto::read_arg_string(&mut cursor).unwrap();
         assert_eq!(
@@ -1022,8 +904,6 @@ fn wlproxy_global_filtering() {
             "obj 6 (XdgToplevel) should have app_id replaced: got {app_id:?}"
         );
     }
-
-    cleanup_wlproxy(wlproxy);
 }
 
 // ---------------------------------------------------------------------------
@@ -1036,14 +916,19 @@ fn wlproxy_fd_forwarding_server_to_client() {
     use std::os::unix::io::{AsRawFd, FromRawFd, OwnedFd};
     use uds::UnixStreamExt;
 
-    let dir = tempdir().unwrap();
-    let mock_listener =
-        std::os::unix::net::UnixListener::bind(dir.path().join("upstream.sock")).unwrap();
+    let dir = tempfile::tempdir().unwrap();
+    let (mut client, downstream) = UnixStream::pair().unwrap();
+    let (upstream, compositor) = UnixStream::pair().unwrap();
 
-    let (wlproxy, compositor, mut client) = spawn_wlproxy(&[], dir.path(), &mock_listener);
+    client
+        .set_read_timeout(Some(Duration::from_secs(2)))
+        .unwrap();
+
+    let args = base_args(dir.path());
+    handle_connection(downstream, upstream, &args);
 
     // Create a dummy socket pair — one end's FD is sent through wlproxy.
-    let (dummy_send, dummy_recv) = std::os::unix::net::UnixStream::pair().unwrap();
+    let (dummy_send, dummy_recv) = UnixStream::pair().unwrap();
     let send_fd = dummy_send.as_raw_fd();
 
     // Build a minimal valid Wayland packet (empty body → 8 bytes total).
@@ -1064,9 +949,6 @@ fn wlproxy_fd_forwarding_server_to_client() {
     drop(dummy_send);
 
     // Client reads from downstream (via wlproxy).
-    // wlproxy should forward both data and the FD.
-    // AncillaryWriter sends header_word1 (4 bytes + FD) and header_word2 (4 bytes)
-    // as separate write() calls — recv_fds may return only the first chunk.
     let mut buf = [0u8; 8];
     let mut fd_buf = [0i32; 8];
     let (n, nfds) = client.recv_fds(&mut buf, &mut fd_buf).unwrap();
@@ -1091,8 +973,6 @@ fn wlproxy_fd_forwarding_server_to_client() {
     // Close the received FD.
     drop(unsafe { OwnedFd::from_raw_fd(fd_buf[0]) });
     drop(dummy_recv);
-
-    cleanup_wlproxy(wlproxy);
 }
 
 #[test]
@@ -1101,14 +981,19 @@ fn wlproxy_fd_forwarding_client_to_server() {
     use std::os::unix::io::{AsRawFd, FromRawFd, OwnedFd};
     use uds::UnixStreamExt;
 
-    let dir = tempdir().unwrap();
-    let mock_listener =
-        std::os::unix::net::UnixListener::bind(dir.path().join("upstream.sock")).unwrap();
+    let dir = tempfile::tempdir().unwrap();
+    let (client, downstream) = UnixStream::pair().unwrap();
+    let (upstream, mut compositor) = UnixStream::pair().unwrap();
 
-    let (wlproxy, mut compositor, client) = spawn_wlproxy(&[], dir.path(), &mock_listener);
+    compositor
+        .set_read_timeout(Some(Duration::from_secs(2)))
+        .unwrap();
+
+    let args = base_args(dir.path());
+    handle_connection(downstream, upstream, &args);
 
     // Create a dummy socket pair — one end's FD is sent through wlproxy.
-    let (dummy_send, dummy_recv) = std::os::unix::net::UnixStream::pair().unwrap();
+    let (dummy_send, dummy_recv) = UnixStream::pair().unwrap();
     let send_fd = dummy_send.as_raw_fd();
 
     // Build a minimal valid Wayland packet (empty body → 8 bytes total).
@@ -1129,7 +1014,6 @@ fn wlproxy_fd_forwarding_client_to_server() {
     drop(dummy_send);
 
     // Compositor reads from upstream (via wlproxy).
-    // wlproxy should forward both data and the FD.
     let mut buf = [0u8; 8];
     let mut fd_buf = [0i32; 8];
     let (n, nfds) = compositor.recv_fds(&mut buf, &mut fd_buf).unwrap();
@@ -1154,8 +1038,6 @@ fn wlproxy_fd_forwarding_client_to_server() {
     // Close the received FD.
     drop(unsafe { OwnedFd::from_raw_fd(fd_buf[0]) });
     drop(dummy_recv);
-
-    cleanup_wlproxy(wlproxy);
 }
 
 // ---------------------------------------------------------------------------
@@ -1164,54 +1046,55 @@ fn wlproxy_fd_forwarding_client_to_server() {
 
 #[test]
 fn wlproxy_block_interfaces() {
-    let dir = tempdir().unwrap();
-    let mock_listener =
-        std::os::unix::net::UnixListener::bind(dir.path().join("upstream.sock")).unwrap();
+    let dir = tempfile::tempdir().unwrap();
+    let (mut client, downstream) = UnixStream::pair().unwrap();
+    let (upstream, mut compositor) = UnixStream::pair().unwrap();
 
-    let (wlproxy, mut compositor, mut client) = spawn_wlproxy(
-        &[
-            "--block",
-            "zwlr_layer_shell_v1,ext_data_control_manager_v1,zwlr_screencopy_manager_v1",
+    for s in [&client, &compositor] {
+        s.set_read_timeout(Some(Duration::from_secs(2))).unwrap();
+    }
+
+    let args = Args {
+        block: vec![
+            "zwlr_layer_shell_v1".to_string(),
+            "ext_data_control_manager_v1".to_string(),
+            "zwlr_screencopy_manager_v1".to_string(),
         ],
-        dir.path(),
-        &mock_listener,
-    );
-
-    // Helper to send a global event from the compositor.
-    let send_global = |compositor: &mut UnixStream, type_id: u32, name: &str, version: u32| {
-        let mut body = vec![];
-        proto::write_arg_uint(&mut body, type_id).unwrap();
-        proto::write_arg_string(&mut body, name).unwrap();
-        proto::write_arg_uint(&mut body, version).unwrap();
-        write_packet(
-            compositor,
-            &Packet {
-                id: 2,
-                opcode: 0,
-                body,
-            },
-        )
-        .unwrap();
+        ..base_args(dir.path())
     };
+    handle_connection(downstream, upstream, &args);
 
-    // 1. Create registry via get_registry (opcode=1, id 1 → registry at id 2).
+    // 1. Create registry via get_registry.
     {
         let mut body = vec![];
         proto::write_arg_uint(&mut body, 2).unwrap();
-        write_packet(
+        send_pkt(
             &mut client,
             &Packet {
                 id: 1,
                 opcode: 1,
                 body,
             },
-        )
-        .unwrap();
+        );
     }
-    // Drain from compositor side.
-    let _ = read_packet(&mut compositor).unwrap().unwrap();
+    let _ = recv_pkt(&mut compositor);
 
-    // 2. Compositor sends globals: some for blocked interfaces, some not.
+    // 2. Helper to send a global event.
+    let send_global = |compositor: &mut UnixStream, type_id: u32, name: &str, version: u32| {
+        let mut body = vec![];
+        proto::write_arg_uint(&mut body, type_id).unwrap();
+        proto::write_arg_string(&mut body, name).unwrap();
+        proto::write_arg_uint(&mut body, version).unwrap();
+        send_pkt(
+            compositor,
+            &Packet {
+                id: 2,
+                opcode: 0,
+                body,
+            },
+        );
+    };
+
     send_global(&mut compositor, 0, "wl_compositor", 4);
     send_global(&mut compositor, 1, "zwlr_layer_shell_v1", 5); // BLOCKED
     send_global(&mut compositor, 2, "xdg_wm_base", 6);
@@ -1223,21 +1106,19 @@ fn wlproxy_block_interfaces() {
     {
         let mut body = vec![];
         proto::write_arg_uint(&mut body, 999).unwrap();
-        write_packet(
+        send_pkt(
             &mut compositor,
             &Packet {
                 id: 1,
                 opcode: 1,
                 body,
             },
-        )
-        .unwrap();
+        );
     }
 
     // 4. Client reads globals — should see only wl_compositor, xdg_wm_base, wl_shm.
-    //    Each read confirms the blocked interfaces were silently dropped in between.
     for &expected in &["wl_compositor", "xdg_wm_base", "wl_shm"] {
-        let p = read_packet(&mut client).unwrap().unwrap();
+        let p = recv_pkt(&mut client);
         assert_eq!(p.id, 2, "expected global on registry (id 2)");
         assert_eq!(p.opcode, 0, "expected global event (opcode 0)");
         let mut cursor = std::io::Cursor::new(&p.body);
@@ -1250,8 +1131,8 @@ fn wlproxy_block_interfaces() {
         );
     }
 
-    // 5. Next packet should be the sentinel, NOT a global for a blocked interface.
-    let sentinel = read_packet(&mut client).unwrap().unwrap();
+    // 5. Next packet should be the sentinel.
+    let sentinel = recv_pkt(&mut client);
     assert_eq!(
         sentinel,
         Packet {
@@ -1265,45 +1146,43 @@ fn wlproxy_block_interfaces() {
         },
         "expected sentinel after allowed interfaces"
     );
-
-    cleanup_wlproxy(wlproxy);
 }
 
 #[test]
 fn wlproxy_block_interfaces_app_id_still_works() {
-    let dir = tempdir().unwrap();
-    let mock_listener =
-        std::os::unix::net::UnixListener::bind(dir.path().join("upstream.sock")).unwrap();
+    let dir = tempfile::tempdir().unwrap();
+    let (mut client, downstream) = UnixStream::pair().unwrap();
+    let (upstream, mut compositor) = UnixStream::pair().unwrap();
 
-    // Block unrelated interfaces; app_id replacement should still work.
-    let (wlproxy, mut compositor, mut client) = spawn_wlproxy(
-        &[
-            "--app-id",
-            "filtered",
-            "--block",
-            "zwlr_layer_shell_v1,ext_data_control_manager_v1",
+    for s in [&client, &compositor] {
+        s.set_read_timeout(Some(Duration::from_secs(2))).unwrap();
+    }
+
+    let args = Args {
+        app_id: Some("filtered".to_string()),
+        block: vec![
+            "zwlr_layer_shell_v1".to_string(),
+            "ext_data_control_manager_v1".to_string(),
         ],
-        dir.path(),
-        &mock_listener,
-    );
+        ..base_args(dir.path())
+    };
+    handle_connection(downstream, upstream, &args);
 
     build_object_chain(&mut client, &mut compositor);
 
     // Send set_app_id and verify it's replaced.
-    {
-        let mut body = vec![];
-        proto::write_arg_string(&mut body, "my-app").unwrap();
-        write_packet(
-            &mut client,
-            &Packet {
-                id: 5,
-                opcode: 3,
-                body,
-            },
-        )
-        .unwrap();
-    }
-    let modified = read_packet(&mut compositor).unwrap().unwrap();
+    let mut body = vec![];
+    proto::write_arg_string(&mut body, "my-app").unwrap();
+    send_pkt(
+        &mut client,
+        &Packet {
+            id: 5,
+            opcode: 3,
+            body,
+        },
+    );
+
+    let modified = recv_pkt(&mut compositor);
     let mut cursor = std::io::Cursor::new(&modified.body[..]);
     let replaced = proto::read_arg_string(&mut cursor).unwrap();
     assert_eq!(
@@ -1311,8 +1190,6 @@ fn wlproxy_block_interfaces_app_id_still_works() {
         Some("filtered"),
         "app_id replacement should work alongside interface blocking: got {replaced:?}"
     );
-
-    cleanup_wlproxy(wlproxy);
 }
 
 #[test]
@@ -1320,31 +1197,34 @@ fn wlproxy_block_interfaces_does_not_leak_fds() {
     use std::os::unix::io::AsRawFd;
     use uds::UnixStreamExt;
 
-    let dir = tempdir().unwrap();
-    let mock_listener =
-        std::os::unix::net::UnixListener::bind(dir.path().join("upstream.sock")).unwrap();
+    let dir = tempfile::tempdir().unwrap();
+    let (mut client, downstream) = UnixStream::pair().unwrap();
+    let (upstream, mut compositor) = UnixStream::pair().unwrap();
 
-    let (wlproxy, mut compositor, mut client) = spawn_wlproxy(
-        &["--block", "zwlr_layer_shell_v1"],
-        dir.path(),
-        &mock_listener,
-    );
+    for s in [&client, &compositor] {
+        s.set_read_timeout(Some(Duration::from_secs(2))).unwrap();
+    }
+
+    let args = Args {
+        block: vec!["zwlr_layer_shell_v1".to_string()],
+        ..base_args(dir.path())
+    };
+    handle_connection(downstream, upstream, &args);
 
     // 1. Create registry.
     {
         let mut body = vec![];
         proto::write_arg_uint(&mut body, 2).unwrap();
-        write_packet(
+        send_pkt(
             &mut client,
             &Packet {
                 id: 1,
                 opcode: 1,
                 body,
             },
-        )
-        .unwrap();
+        );
     }
-    let _ = read_packet(&mut compositor).unwrap().unwrap();
+    let _ = recv_pkt(&mut compositor);
 
     // 2. Send a global for a blocked interface with an FD attached.
     let mut global_body = vec![];
@@ -1362,45 +1242,43 @@ fn wlproxy_block_interfaces_does_not_leak_fds() {
     )
     .unwrap();
 
-    let (dummy_send, dummy_recv) = std::os::unix::net::UnixStream::pair().unwrap();
+    let (dummy_send, _dummy_recv) = UnixStream::pair().unwrap();
     let send_fd = dummy_send.as_raw_fd();
     compositor.send_fds(&packet_bytes, &[send_fd]).unwrap();
     drop(dummy_send);
 
-    // 3. Send a global for a non-blocked interface (to verify fd consumption didn't break forwarding).
+    // 3. Send a global for a non-blocked interface.
     {
         let mut body = vec![];
         proto::write_arg_uint(&mut body, 1).unwrap();
         proto::write_arg_string(&mut body, "wl_compositor").unwrap();
         proto::write_arg_uint(&mut body, 4).unwrap();
-        write_packet(
+        send_pkt(
             &mut compositor,
             &Packet {
                 id: 2,
                 opcode: 0,
                 body,
             },
-        )
-        .unwrap();
+        );
     }
 
-    // 4. Send a sentinel to mark the end.
+    // 4. Send a sentinel.
     {
         let mut body = vec![];
         proto::write_arg_uint(&mut body, 999).unwrap();
-        write_packet(
+        send_pkt(
             &mut compositor,
             &Packet {
                 id: 1,
                 opcode: 1,
                 body,
             },
-        )
-        .unwrap();
+        );
     }
 
-    // 5. Client reads — should see wl_compositor (blocked interface's FD was dropped).
-    let p = read_packet(&mut client).unwrap().unwrap();
+    // 5. Client reads — should see wl_compositor.
+    let p = recv_pkt(&mut client);
     assert_eq!(p.id, 2);
     assert_eq!(p.opcode, 0);
     let mut cursor = std::io::Cursor::new(&p.body);
@@ -1408,15 +1286,12 @@ fn wlproxy_block_interfaces_does_not_leak_fds() {
     let name = proto::read_arg_string(&mut cursor).unwrap();
     assert_eq!(name.as_deref(), Some("wl_compositor"));
 
-    // 6. Verify sentinel (confirms no extra packets leaked past the blocked one).
-    let sentinel = read_packet(&mut client).unwrap().unwrap();
+    // 6. Verify sentinel.
+    let sentinel = recv_pkt(&mut client);
     assert_eq!(sentinel.id, 1);
     assert_eq!(sentinel.opcode, 1);
     let mut cursor = std::io::Cursor::new(&sentinel.body);
     assert_eq!(proto::read_arg_uint(&mut cursor).unwrap(), 999);
-
-    drop(dummy_recv);
-    cleanup_wlproxy(wlproxy);
 }
 
 #[test]
@@ -1425,31 +1300,34 @@ fn wlproxy_block_interfaces_does_not_leak_fds_on_bind() {
     use std::os::unix::io::AsRawFd;
     use uds::UnixStreamExt;
 
-    let dir = tempdir().unwrap();
-    let mock_listener =
-        std::os::unix::net::UnixListener::bind(dir.path().join("upstream.sock")).unwrap();
+    let dir = tempfile::tempdir().unwrap();
+    let (mut client, downstream) = UnixStream::pair().unwrap();
+    let (upstream, mut compositor) = UnixStream::pair().unwrap();
 
-    let (wlproxy, mut compositor, mut client) = spawn_wlproxy(
-        &["--block", "zwlr_layer_shell_v1"],
-        dir.path(),
-        &mock_listener,
-    );
+    for s in [&client, &compositor] {
+        s.set_read_timeout(Some(Duration::from_secs(2))).unwrap();
+    }
+
+    let args = Args {
+        block: vec!["zwlr_layer_shell_v1".to_string()],
+        ..base_args(dir.path())
+    };
+    handle_connection(downstream, upstream, &args);
 
     // 1. Create registry.
     {
         let mut body = vec![];
         proto::write_arg_uint(&mut body, 2).unwrap();
-        write_packet(
+        send_pkt(
             &mut client,
             &Packet {
                 id: 1,
                 opcode: 1,
                 body,
             },
-        )
-        .unwrap();
+        );
     }
-    let _ = read_packet(&mut compositor).unwrap().unwrap();
+    let _ = recv_pkt(&mut compositor);
 
     // 2. Build a bind request for the blocked interface.
     let mut bind_body = vec![];
@@ -1469,81 +1347,74 @@ fn wlproxy_block_interfaces_does_not_leak_fds_on_bind() {
     .unwrap();
 
     // 3. Send the bind request with an FD attached.
-    let (dummy_send, mut dummy_recv) = std::os::unix::net::UnixStream::pair().unwrap();
+    let (dummy_send, mut dummy_recv) = UnixStream::pair().unwrap();
     let send_fd = dummy_send.as_raw_fd();
     client.send_fds(&packet_bytes, &[send_fd]).unwrap();
     drop(dummy_send);
 
-    // 4. Send a non-blocked message to verify wlproxy still works.
+    // 4. Send a non-blocked message.
     {
         let mut body = vec![];
         proto::write_arg_uint(&mut body, 999).unwrap();
-        write_packet(
+        send_pkt(
             &mut client,
             &Packet {
                 id: 1,
                 opcode: 0,
                 body,
             },
-        )
-        .unwrap();
+        );
     }
 
     // 5. Compositor receives the non-blocked message (NOT the blocked bind).
-    let received = read_packet(&mut compositor).unwrap().unwrap();
+    let received = recv_pkt(&mut compositor);
     assert_eq!(
         received.id, 1,
         "only non-blocked message should reach compositor"
     );
     assert_eq!(received.opcode, 0);
 
-    // 6. Verify the FD was closed by trying to read from the other end.
-    //    After the send end was dropped and wlproxy closed its copy,
-    //    reading from dummy_recv should return Ok(0) (EOF).
+    // 6. Verify the FD was closed.
     let mut probe = [0u8; 1];
     let n = dummy_recv.read(&mut probe).unwrap();
     assert_eq!(n, 0, "dummy FD should have been closed by wlproxy");
 
     drop(dummy_recv);
-    cleanup_wlproxy(wlproxy);
 }
 
 #[test]
 fn wlproxy_block_interfaces_and_title_prefix() {
-    let dir = tempdir().unwrap();
-    let mock_listener =
-        std::os::unix::net::UnixListener::bind(dir.path().join("upstream.sock")).unwrap();
+    let dir = tempfile::tempdir().unwrap();
+    let (mut client, downstream) = UnixStream::pair().unwrap();
+    let (upstream, mut compositor) = UnixStream::pair().unwrap();
 
-    // Block unrelated interfaces; title prefix should still work.
-    let (wlproxy, mut compositor, mut client) = spawn_wlproxy(
-        &[
-            "--title",
-            "pfx-",
-            "--prefix-title",
-            "--block",
-            "zwlr_layer_shell_v1",
-        ],
-        dir.path(),
-        &mock_listener,
-    );
+    for s in [&client, &compositor] {
+        s.set_read_timeout(Some(Duration::from_secs(2))).unwrap();
+    }
+
+    let args = Args {
+        title: Some("pfx-".to_string()),
+        prefix_title: true,
+        block: vec!["zwlr_layer_shell_v1".to_string()],
+        ..base_args(dir.path())
+    };
+    handle_connection(downstream, upstream, &args);
 
     build_object_chain(&mut client, &mut compositor);
 
     // Send set_title and verify it's prefixed.
-    {
-        let mut body = vec![];
-        proto::write_arg_string(&mut body, "my-title").unwrap();
-        write_packet(
-            &mut client,
-            &Packet {
-                id: 5,
-                opcode: 2,
-                body,
-            },
-        )
-        .unwrap();
-    }
-    let modified = read_packet(&mut compositor).unwrap().unwrap();
+    let mut body = vec![];
+    proto::write_arg_string(&mut body, "my-title").unwrap();
+    send_pkt(
+        &mut client,
+        &Packet {
+            id: 5,
+            opcode: 2,
+            body,
+        },
+    );
+
+    let modified = recv_pkt(&mut compositor);
     let mut cursor = std::io::Cursor::new(&modified.body[..]);
     let replaced = proto::read_arg_string(&mut cursor).unwrap();
     assert_eq!(
@@ -1551,105 +1422,71 @@ fn wlproxy_block_interfaces_and_title_prefix() {
         Some("pfx-my-title"),
         "title prefix should work alongside interface blocking: got {replaced:?}"
     );
-
-    cleanup_wlproxy(wlproxy);
-}
-
-#[test]
-fn wlproxy_unknown_interface_warning() {
-    let dir = tempdir().unwrap();
-    let upstream = dir.path().join("upstream.sock");
-    let downstream = dir.path().join("downstream.sock");
-
-    // Start wlproxy with an unknown interface (not in known_protocols.txt).
-    let mut wlproxy = Command::new(wlproxy_binary())
-        .args([
-            "--upstream",
-            upstream.to_str().unwrap(),
-            downstream.to_str().unwrap(),
-            "--block",
-            "UnknownInterface",
-        ])
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::piped())
-        .spawn()
-        .expect("failed to start wlproxy");
-
-    // Give wlproxy time to print warnings (eprintln! flushes on newline
-    // even when piped in Rust's stdio implementation), then kill it.
-    std::thread::sleep(Duration::from_millis(500));
-    wlproxy.kill().unwrap();
-    let output = wlproxy.wait_with_output().unwrap();
-
-    let stderr = String::from_utf8_lossy(&output.stderr);
-    assert!(
-        stderr.contains("unknown Wayland interface"),
-        "expected warning about unknown interface in stderr, got: {stderr}"
-    );
 }
 
 #[test]
 fn wlproxy_block_interfaces_blocks_bind_requests() {
-    let dir = tempdir().unwrap();
-    let mock_listener =
-        std::os::unix::net::UnixListener::bind(dir.path().join("upstream.sock")).unwrap();
+    let dir = tempfile::tempdir().unwrap();
+    let (mut client, downstream) = UnixStream::pair().unwrap();
+    let (upstream, mut compositor) = UnixStream::pair().unwrap();
 
-    let (wlproxy, mut compositor, mut client) = spawn_wlproxy(
-        &["--block", "zwlr_layer_shell_v1"],
-        dir.path(),
-        &mock_listener,
-    );
+    for s in [&client, &compositor] {
+        s.set_read_timeout(Some(Duration::from_secs(2))).unwrap();
+    }
 
-    // 1. Create registry via get_registry (opcode=1, id 1 → registry at id 2).
+    let args = Args {
+        block: vec!["zwlr_layer_shell_v1".to_string()],
+        app_id: Some("filtered".to_string()),
+        ..base_args(dir.path())
+    };
+    handle_connection(downstream, upstream, &args);
+
+    // 1. Create registry via get_registry.
     {
         let mut body = vec![];
         proto::write_arg_uint(&mut body, 2).unwrap();
-        write_packet(
+        send_pkt(
             &mut client,
             &Packet {
                 id: 1,
                 opcode: 1,
                 body,
             },
-        )
-        .unwrap();
+        );
     }
-    // Drain on compositor side.
-    let _ = read_packet(&mut compositor).unwrap().unwrap();
+    let _ = recv_pkt(&mut compositor);
 
-    // 2. Compositor announces globals: xdg_wm_base (allowed) and zwlr_layer_shell_v1 (blocked).
+    // 2. Compositor announces globals: xdg_wm_base and zwlr_layer_shell_v1.
     {
         let mut body = vec![];
         proto::write_arg_uint(&mut body, 0).unwrap();
         proto::write_arg_string(&mut body, "xdg_wm_base").unwrap();
         proto::write_arg_uint(&mut body, 6).unwrap();
-        write_packet(
+        send_pkt(
             &mut compositor,
             &Packet {
                 id: 2,
                 opcode: 0,
                 body,
             },
-        )
-        .unwrap();
+        );
     }
     {
         let mut body = vec![];
         proto::write_arg_uint(&mut body, 1).unwrap();
         proto::write_arg_string(&mut body, "zwlr_layer_shell_v1").unwrap();
         proto::write_arg_uint(&mut body, 5).unwrap();
-        write_packet(
+        send_pkt(
             &mut compositor,
             &Packet {
                 id: 2,
                 opcode: 0,
                 body,
             },
-        )
-        .unwrap();
+        );
     }
-    // Drain client-side globals (second is blocked, so only 1 arrives).
-    let global = read_packet(&mut client).unwrap().unwrap();
+    // Client reads globals (second is blocked, only 1 arrives).
+    let global = recv_pkt(&mut client);
     assert_eq!(global.id, 2);
     assert_eq!(global.opcode, 0);
     let mut cursor = std::io::Cursor::new(&global.body);
@@ -1658,74 +1495,61 @@ fn wlproxy_block_interfaces_blocks_bind_requests() {
     assert_eq!(
         name.as_deref(),
         Some("xdg_wm_base"),
-        "only xdg_wm_base interface should reach client"
+        "only xdg_wm_base global should reach client"
     );
 
-    // 3. Client tries to bind zwlr_layer_shell_v1 (bypass attempt).
-    //    The bind includes the interface name — wlproxy should intercept it.
-    let blocked_obj_id = 3u32;
+    // 3. Client tries to bind zwlr_layer_shell_v1 (blocked).
     {
         let mut body = vec![];
         proto::write_arg_uint(&mut body, 1).unwrap();
         proto::write_arg_string(&mut body, "zwlr_layer_shell_v1").unwrap();
         proto::write_arg_uint(&mut body, 5).unwrap();
-        proto::write_arg_uint(&mut body, blocked_obj_id).unwrap();
-        write_packet(
+        proto::write_arg_uint(&mut body, 3).unwrap();
+        send_pkt(
             &mut client,
             &Packet {
                 id: 2,
                 opcode: 0,
                 body,
             },
-        )
-        .unwrap();
+        );
     }
 
-    // 4. Client also sends a legitimate bind for xdg_wm_base (should pass through).
+    // 4. Client binds xdg_wm_base (should pass through).
     {
         let mut body = vec![];
         proto::write_arg_uint(&mut body, 0).unwrap();
         proto::write_arg_string(&mut body, "xdg_wm_base").unwrap();
         proto::write_arg_uint(&mut body, 6).unwrap();
         proto::write_arg_uint(&mut body, 4).unwrap();
-        write_packet(
+        send_pkt(
             &mut client,
             &Packet {
                 id: 2,
                 opcode: 0,
                 body,
             },
-        )
-        .unwrap();
+        );
     }
 
-    // 5. Send sentinel from compositor to verify client is still alive.
+    // 5. Sentinel from compositor.
     {
         let mut body = vec![];
         proto::write_arg_uint(&mut body, 999).unwrap();
-        write_packet(
+        send_pkt(
             &mut compositor,
             &Packet {
                 id: 1,
                 opcode: 1,
                 body,
             },
-        )
-        .unwrap();
+        );
     }
 
-    // 6. Compositor should receive: get_registry, xdg_wm_base bind (NOT zwlr_layer_shell_v1 bind).
-    // Wait — we already drained get_registry in step 1. So compositor's next read should be
-    // the xdg_wm_base bind (the zwlr_layer_shell_v1 bind was dropped by wlproxy).
-    let compositor_received = read_packet(&mut compositor).unwrap().unwrap();
-    assert_eq!(
-        compositor_received.id, 2,
-        "compositor should receive bind on registry"
-    );
-    assert_eq!(
-        compositor_received.opcode, 0,
-        "compositor should receive bind opcode"
-    );
+    // 6. Compositor should receive only the xdg_wm_base bind.
+    let compositor_received = recv_pkt(&mut compositor);
+    assert_eq!(compositor_received.id, 2);
+    assert_eq!(compositor_received.opcode, 0);
     let mut cursor = std::io::Cursor::new(&compositor_received.body);
     let _type_id = proto::read_arg_uint(&mut cursor).unwrap();
     let iface = proto::read_arg_string(&mut cursor).unwrap();
@@ -1736,78 +1560,73 @@ fn wlproxy_block_interfaces_blocks_bind_requests() {
         iface
     );
 
-    // 7. Client should receive the sentinel (confirming wlproxy still works normally).
-    let sentinel = read_packet(&mut client).unwrap().unwrap();
+    // 7. Client receives sentinel.
+    let sentinel = recv_pkt(&mut client);
     assert_eq!(sentinel.id, 1);
     assert_eq!(sentinel.opcode, 1);
 
-    // 8. Verify client→compositor still works for normal messages after blocked bind.
-    //    Build object chain on xdg_wm_base to confirm app_id replacement works.
+    // 8. Build object chain on xdg_wm_base.
     {
-        // XdgWmBase.get_xdg_surface (opcode=2, id 4) → surface at id 5.
-        let mut body = vec![];
-        proto::write_arg_uint(&mut body, 5).unwrap();
-        write_packet(
+        let mut b = vec![];
+        proto::write_arg_uint(&mut b, 5).unwrap();
+        send_pkt(
             &mut client,
             &Packet {
                 id: 4,
                 opcode: 2,
-                body,
+                body: b,
             },
-        )
-        .unwrap();
+        );
     }
-    let _ = read_packet(&mut compositor).unwrap().unwrap();
+    let _ = recv_pkt(&mut compositor);
 
     {
-        // XdgSurface.create_toplevel (opcode=1, id 5) → toplevel at id 6.
-        let mut body = vec![];
-        proto::write_arg_uint(&mut body, 6).unwrap();
-        write_packet(
+        let mut b = vec![];
+        proto::write_arg_uint(&mut b, 6).unwrap();
+        send_pkt(
             &mut client,
             &Packet {
                 id: 5,
                 opcode: 1,
-                body,
+                body: b,
             },
-        )
-        .unwrap();
+        );
     }
-    let _ = read_packet(&mut compositor).unwrap().unwrap();
-
-    cleanup_wlproxy(wlproxy);
+    let _ = recv_pkt(&mut compositor);
 }
 
 #[test]
 fn wlproxy_block_interfaces_drops_messages_to_blocked_object() {
-    let dir = tempdir().unwrap();
-    let mock_listener =
-        std::os::unix::net::UnixListener::bind(dir.path().join("upstream.sock")).unwrap();
+    let dir = tempfile::tempdir().unwrap();
+    let (mut client, downstream) = UnixStream::pair().unwrap();
+    let (upstream, mut compositor) = UnixStream::pair().unwrap();
 
-    let (wlproxy, mut compositor, mut client) = spawn_wlproxy(
-        &["--block", "zwlr_layer_shell_v1"],
-        dir.path(),
-        &mock_listener,
-    );
+    for s in [&client, &compositor] {
+        s.set_read_timeout(Some(Duration::from_secs(2))).unwrap();
+    }
+
+    let args = Args {
+        block: vec!["zwlr_layer_shell_v1".to_string()],
+        ..base_args(dir.path())
+    };
+    handle_connection(downstream, upstream, &args);
 
     // 1. Create registry.
     {
         let mut body = vec![];
         proto::write_arg_uint(&mut body, 2).unwrap();
-        write_packet(
+        send_pkt(
             &mut client,
             &Packet {
                 id: 1,
                 opcode: 1,
                 body,
             },
-        )
-        .unwrap();
+        );
     }
-    let _ = read_packet(&mut compositor).unwrap().unwrap();
+    let _ = recv_pkt(&mut compositor);
 
-    // 2. Client sends bind for zwlr_layer_shell_v1 — blocked by wlproxy.
-    //    (No globals announced — the malicious client is guessing type_id.)
+    // 2. Client sends bind for zwlr_layer_shell_v1 — blocked.
     let blocked_obj_id = 3u32;
     {
         let mut body = vec![];
@@ -1815,110 +1634,99 @@ fn wlproxy_block_interfaces_drops_messages_to_blocked_object() {
         proto::write_arg_string(&mut body, "zwlr_layer_shell_v1").unwrap();
         proto::write_arg_uint(&mut body, 5).unwrap();
         proto::write_arg_uint(&mut body, blocked_obj_id).unwrap();
-        write_packet(
+        send_pkt(
             &mut client,
             &Packet {
                 id: 2,
                 opcode: 0,
                 body,
             },
-        )
-        .unwrap();
+        );
     }
 
-    // 4. Client sends a message to the blocked object (e.g. a get_layer_surface request).
-    //    This should also be dropped by wlproxy.
+    // 3. Client sends a message to the blocked object.
     {
-        // zwlr_layer_shell_v1.get_layer_surface (opcode 0 for example).
         let mut body = vec![];
         proto::write_arg_uint(&mut body, 10).unwrap();
-        write_packet(
+        send_pkt(
             &mut client,
             &Packet {
                 id: blocked_obj_id,
                 opcode: 0,
                 body,
             },
-        )
-        .unwrap();
+        );
     }
 
-    // 5. Also verify that a normal packet to display still works.
-    //    Client sends a non-blocked message (Display.get_registry creates another registry
-    //    at a different id — just sending any valid-looking packet to id 1, opcode 0).
+    // 4. Send a normal packet to display.
     {
-        write_packet(
+        send_pkt(
             &mut client,
             &Packet {
                 id: 1,
                 opcode: 0,
                 body: vec![0; 4],
             },
-        )
-        .unwrap();
+        );
     }
 
-    // 6. Compositor should NOT see the blocked bind or the message to blocked object.
-    //    Compositor should only see the Display opcode 0 message.
-    let received = read_packet(&mut compositor).unwrap().unwrap();
+    // 5. Compositor should only see the Display message.
+    let received = recv_pkt(&mut compositor);
     assert_eq!(
         received.id, 1,
         "only display message should reach compositor"
     );
     assert_eq!(received.opcode, 0);
-
-    cleanup_wlproxy(wlproxy);
 }
 
 #[test]
 fn wlproxy_block_multiple_flags() {
-    let dir = tempdir().unwrap();
-    let mock_listener =
-        std::os::unix::net::UnixListener::bind(dir.path().join("upstream.sock")).unwrap();
+    let dir = tempfile::tempdir().unwrap();
+    let (mut client, downstream) = UnixStream::pair().unwrap();
+    let (upstream, mut compositor) = UnixStream::pair().unwrap();
 
-    // Pass --block twice with different values.
-    let (wlproxy, mut compositor, mut client) = spawn_wlproxy(
-        &[
-            "--block",
-            "zwlr_layer_shell_v1",
-            "--block",
-            "ext_data_control_manager_v1",
+    for s in [&client, &compositor] {
+        s.set_read_timeout(Some(Duration::from_secs(2))).unwrap();
+    }
+
+    let args = Args {
+        block: vec![
+            "zwlr_layer_shell_v1".to_string(),
+            "ext_data_control_manager_v1".to_string(),
         ],
-        dir.path(),
-        &mock_listener,
-    );
+        ..base_args(dir.path())
+    };
+    handle_connection(downstream, upstream, &args);
 
     // 1. Create registry.
     {
         let mut body = vec![];
         proto::write_arg_uint(&mut body, 2).unwrap();
-        write_packet(
+        send_pkt(
             &mut client,
             &Packet {
                 id: 1,
                 opcode: 1,
                 body,
             },
-        )
-        .unwrap();
+        );
     }
-    let _ = read_packet(&mut compositor).unwrap().unwrap();
+    let _ = recv_pkt(&mut compositor);
 
-    // 2. Compositor sends globals.
+    // 2. Helper to send globals.
     let send_global = |compositor: &mut UnixStream, type_id: u32, name: &str, version: u32| {
         let mut body = vec![];
         proto::write_arg_uint(&mut body, type_id).unwrap();
         proto::write_arg_string(&mut body, name).unwrap();
         proto::write_arg_uint(&mut body, version).unwrap();
-        write_packet(
+        send_pkt(
             compositor,
             &Packet {
                 id: 2,
                 opcode: 0,
                 body,
             },
-        )
-        .unwrap();
+        );
     };
 
     send_global(&mut compositor, 0, "wl_compositor", 4);
@@ -1930,20 +1738,19 @@ fn wlproxy_block_multiple_flags() {
     {
         let mut body = vec![];
         proto::write_arg_uint(&mut body, 999).unwrap();
-        write_packet(
+        send_pkt(
             &mut compositor,
             &Packet {
                 id: 1,
                 opcode: 1,
                 body,
             },
-        )
-        .unwrap();
+        );
     }
 
     // 4. Client should see only wl_compositor and xdg_wm_base.
     for &expected in &["wl_compositor", "xdg_wm_base"] {
-        let p = read_packet(&mut client).unwrap().unwrap();
+        let p = recv_pkt(&mut client);
         assert_eq!(p.id, 2);
         assert_eq!(p.opcode, 0);
         let mut cursor = std::io::Cursor::new(&p.body);
@@ -1957,9 +1764,7 @@ fn wlproxy_block_multiple_flags() {
     }
 
     // 5. Sentinel.
-    let sentinel = read_packet(&mut client).unwrap().unwrap();
+    let sentinel = recv_pkt(&mut client);
     assert_eq!(sentinel.id, 1);
     assert_eq!(sentinel.opcode, 1);
-
-    cleanup_wlproxy(wlproxy);
 }
