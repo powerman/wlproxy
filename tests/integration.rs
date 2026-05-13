@@ -564,6 +564,114 @@ fn wlproxy_delete_id() {
     cleanup_wlproxy(wlproxy);
 }
 
+#[test]
+fn wlproxy_delete_id_registry() {
+    let dir = tempdir().unwrap();
+    let mock_listener =
+        std::os::unix::net::UnixListener::bind(dir.path().join("upstream.sock")).unwrap();
+
+    let (wlproxy, mut compositor, mut client) =
+        spawn_wlproxy(&["--app-id", "filtered"], dir.path(), &mock_listener);
+
+    // 1. Client sends Display.get_registry (opcode=1, id 1) → Registry at id 2.
+    {
+        let mut body = vec![];
+        proto::write_arg_uint(&mut body, 2).unwrap();
+        write_packet(
+            &mut client,
+            &Packet {
+                id: 1,
+                opcode: 1,
+                body,
+            },
+        )
+        .unwrap();
+    }
+    let _ = read_packet(&mut compositor).unwrap().unwrap();
+
+    // 2. Compositor sends globals on registry (id 2), including xdg_wm_base.
+    {
+        let mut body = vec![];
+        proto::write_arg_uint(&mut body, 0).unwrap();
+        proto::write_arg_string(&mut body, "xdg_wm_base").unwrap();
+        proto::write_arg_uint(&mut body, 6).unwrap();
+        write_packet(
+            &mut compositor,
+            &Packet {
+                id: 2,
+                opcode: 0,
+                body,
+            },
+        )
+        .unwrap();
+    }
+    let _ = read_packet(&mut client).unwrap().unwrap();
+
+    // 3. Compositor deletes registry (id 2).
+    {
+        let mut body = vec![];
+        proto::write_arg_uint(&mut body, 2).unwrap();
+        write_packet(
+            &mut compositor,
+            &Packet {
+                id: 1,
+                opcode: 1,
+                body,
+            },
+        )
+        .unwrap();
+    }
+    let _ = read_packet(&mut client).unwrap().unwrap();
+
+    // 4. Client sends get_registry again → new Registry at id 3.
+    {
+        let mut body = vec![];
+        proto::write_arg_uint(&mut body, 3).unwrap();
+        write_packet(
+            &mut client,
+            &Packet {
+                id: 1,
+                opcode: 1,
+                body,
+            },
+        )
+        .unwrap();
+    }
+    let _ = read_packet(&mut compositor).unwrap().unwrap();
+
+    // 5. Compositor sends global on new registry (id 3) for wl_compositor.
+    //    This validates that cache_reg_id was cleared — otherwise
+    //    the global would be ignored because it's on id 3, not cached id 2.
+    {
+        let mut body = vec![];
+        proto::write_arg_uint(&mut body, 0).unwrap();
+        proto::write_arg_string(&mut body, "wl_compositor").unwrap();
+        proto::write_arg_uint(&mut body, 4).unwrap();
+        write_packet(
+            &mut compositor,
+            &Packet {
+                id: 3,
+                opcode: 0,
+                body,
+            },
+        )
+        .unwrap();
+    }
+    let p = read_packet(&mut client).unwrap().unwrap();
+    assert_eq!(p.id, 3, "global should arrive on new registry id 3");
+    assert_eq!(p.opcode, 0);
+    let mut cursor = std::io::Cursor::new(&p.body);
+    let _tid = proto::read_arg_uint(&mut cursor).unwrap();
+    let name = proto::read_arg_string(&mut cursor).unwrap();
+    assert_eq!(
+        name.as_deref(),
+        Some("wl_compositor"),
+        "global should be forwarded on new registry"
+    );
+
+    cleanup_wlproxy(wlproxy);
+}
+
 // ---------------------------------------------------------------------------
 // Global event filtering — only xdg_wm_base objects are tracked
 // ---------------------------------------------------------------------------

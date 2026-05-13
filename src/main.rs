@@ -382,6 +382,9 @@ fn handle_server_to_client(
             let obj_id =
                 proto::read_arg_uint(&mut cursor).context("Error reading display delete obj id")?;
             objects.lock().unwrap().remove(&obj_id);
+            if cache_reg_id == Some(obj_id) {
+                cache_reg_id = None;
+            }
         }
         if let Some(reg_id) = match &cache_reg_id {
             Some(r) => Some(*r),
