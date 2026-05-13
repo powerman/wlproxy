@@ -67,7 +67,8 @@ jobs:
           [[ "$TARGET" == *-windows-* ]] && EXT=".exe"
           ASSET_DIR="$(mktemp -d)"
           BIN="target/$TARGET/release/${BINARY_NAME}${EXT}"
-          cp "$BIN" "$ASSET_DIR/${BINARY_NAME}${EXT}"
+          ASSET_NAME="${BINARY_NAME}-${TARGET}${EXT}"
+          cp "$BIN" "$ASSET_DIR/$ASSET_NAME"
           echo "release_asset_dir=$ASSET_DIR" >> "$GITHUB_OUTPUT"
 
       - name: Install UPX
