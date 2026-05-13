@@ -19,7 +19,7 @@ that use its downstream socket.
 
 - **`Args`** — CLI arguments: `--upstream` (path to compositor socket),
   `--downstream` (path to the new socket),
-  `--app-id` / `--title` (replace or prefix — via `--prefix` / `--prefix-title`),
+  `--app-id` / `--title` (replace or prefix — via `--prefix-app-id` / `--prefix-title`),
   `--debug`.
 - **`Packet`** — Wayland message: `id` (object), `opcode`, `body`.
 - **`AncillaryReader` / `AncillaryWriter`** — wrappers for reading/writing

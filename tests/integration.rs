@@ -432,7 +432,7 @@ fn wlproxy_app_id_prefix() {
         std::os::unix::net::UnixListener::bind(dir.path().join("upstream.sock")).unwrap();
 
     let (wlproxy, mut compositor, mut client) = spawn_wlproxy(
-        &["--app-id", "pfx-", "--prefix"],
+        &["--app-id", "pfx-", "--prefix-app-id"],
         dir.path(),
         &mock_listener,
     );

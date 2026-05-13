@@ -57,7 +57,7 @@ Usage: wlproxy ...FLAGS
                          (like `/run/user/1000/wayland-0`)
     --downstream <PATH>  Full path for new Wayland socket
     [--app-id <STRING>]  Force all xdg toplevels to have the same app id
-    [--prefix]           Prefix the app id instead of replacing
+    [--prefix-app-id]    Prefix the app id instead of replacing
     [--title <STRING>]   Force all xdg toplevels to have the same title
     [--prefix-title]     Prefix the title instead of replacing
     [--block <STRING>]   Wayland interfaces to block (can be specified multiple times)
@@ -86,7 +86,7 @@ wlproxy --upstream /run/user/1000/wayland-0 \
 ```sh
 wlproxy --upstream /run/user/1000/wayland-0 \
     --downstream /run/user/1000/wayland-filtered \
-    --app-id pfx- --prefix
+    --app-id pfx- --prefix-app-id
 ```
 
 ### Block privacy-sensitive interfaces

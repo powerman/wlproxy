@@ -33,7 +33,8 @@ struct Args {
     #[vark(flag = "--app-id")]
     app_id: Option<String>,
     /// Prefix the app id instead of replacing
-    prefix: Option<()>,
+    #[vark(flag = "--prefix-app-id")]
+    prefix_app_id: Option<()>,
     /// Force all xdg toplevels to have the same title
     #[vark(flag = "--title")]
     title: Option<String>,
@@ -325,7 +326,7 @@ fn handle_client_to_server(
                                                 read_arg_string(&mut packet.body.as_slice())
                                                     .context("Error reading app id message body")?;
                                             packet.body.clear();
-                                            let new_app_id = if args.prefix.is_some() {
+                                            let new_app_id = if args.prefix_app_id.is_some() {
                                                 format!(
                                                     "{}{}",
                                                     app_id,
