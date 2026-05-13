@@ -35,6 +35,9 @@ pub fn read_packet(serial: &mut impl std::io::Read) -> Result<Option<Packet>, &'
     let header_word2 = read(serial, 4).map_err(|_| "header word 2")?;
     let message_size =
         u16::from_ne_bytes(header_word2[2usize..2usize + 2usize].try_into().unwrap());
+    if message_size < BODY_SIZE_ADJ {
+        return Err("message size too small");
+    }
     let body = read(serial, (message_size - BODY_SIZE_ADJ) as usize).map_err(|_| "body")?;
     let opcode = u16::from_ne_bytes(header_word2[0usize..2usize].try_into().unwrap());
     let id = u32::from_ne_bytes(header_word1[0usize..4usize].try_into().unwrap());
