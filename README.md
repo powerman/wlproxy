@@ -16,7 +16,7 @@ that use its downstream socket.
 This allows you to do things like create a proxy Wayland socket to mount in a container
 and write compositor decoration rules that are specific to the container windows.
 
-Current filters:
+## Features
 
 - Replace or prefix `app_id` -
   this can help writing compositor rules targeting programs running on a wlproxy instance.
@@ -31,25 +31,96 @@ Current filters:
   clipboard (`ext_data_control_manager_v1`, `zwlr_data_control_device_v1`),
   layer shell (`zwlr_layer_shell_v1`), and others.
 
-# How to use it
+## Installation
 
-Your main compositor will have created something like `/run/user/1000/wayland-0` where `1000` is
-your user ID.
+### From source
 
-1. Build `wlproxy` with `cargo build`.
+```sh
+cargo install wlproxy
+```
 
-   If you use `rustup` to manage rust it should read the `rust-toolchain.toml` file and compile
-   accordingly.
+### Pre-built binary
 
-2. Run `wlproxy --upstream /run/user/1000/wayland-0 --downstream /run/user/1000/wayland-filtered --app-id org.example.testid`
+```sh
+cargo binstall wlproxy
+```
 
-   Run `wlproxy --help` for details.
+Or download a pre-built binary from the
+[releases page](https://github.com/powerman/wlproxy/releases).
 
-3. Run Wayland applications or another compositor with `WAYLAND_DISPLAY=wayland-filtered`
+## Usage
 
-# Acknowledgements
+```text
+Usage: wlproxy ...FLAGS
 
-This project is a fork of [andrewbaxter/filterway](https://github.com/andrewbaxter/filterway/), licensed under ISC.
+    --upstream <PATH>    Full path to primary compositor Wayland socket
+                         (like `/run/user/1000/wayland-0`)
+    --downstream <PATH>  Full path for new Wayland socket
+    [--app-id <STRING>]  Force all xdg toplevels to have the same app id
+    [--prefix]           Prefix the app id instead of replacing
+    [--title <STRING>]   Force all xdg toplevels to have the same title
+    [--prefix-title]     Prefix the title instead of replacing
+    [--block <STRING>]   Wayland interfaces to block (can be specified multiple times)
+    [--quiet]            Suppress warnings about unknown interface names
+    [--debug]            Print debug messages
+```
+
+### Basic passthrough
+
+```sh
+wlproxy --upstream /run/user/1000/wayland-0 \
+    --downstream /run/user/1000/wayland-filtered
+WAYLAND_DISPLAY=wayland-filtered my-app
+```
+
+### Replace app_id
+
+```sh
+wlproxy --upstream /run/user/1000/wayland-0 \
+    --downstream /run/user/1000/wayland-filtered \
+    --app-id org.example.testid
+```
+
+### Prefix app_id
+
+```sh
+wlproxy --upstream /run/user/1000/wayland-0 \
+    --downstream /run/user/1000/wayland-filtered \
+    --app-id pfx- --prefix
+```
+
+### Block privacy-sensitive interfaces
+
+When running untrusted applications (e.g. in a container or Flatpak),
+you can block Wayland interfaces that could leak sensitive data
+or compromise the user's session:
+
+```sh
+wlproxy --upstream /run/user/1000/wayland-0 \
+    --downstream /run/user/1000/wayland-filtered \
+    --block zwlr_screencopy_manager_v1 \
+    --block zkde_screencast_unstable_v1 \
+    --block ext_data_control_manager_v1 \
+    --block zwlr_data_control_manager_v1 \
+    --block zwlr_virtual_pointer_manager_v1 \
+    --block zwp_virtual_keyboard_manager_v1
+```
+
+This blocks the following capabilities:
+
+| Interface                                                             | Risk             |
+| --------------------------------------------------------------------- | ---------------- |
+| `zwlr_screencopy_manager_v1` / `zkde_screencast_unstable_v1`          | Screen capture   |
+| `ext_data_control_manager_v1` / `zwlr_data_control_manager_v1`        | Clipboard access |
+| `zwlr_virtual_pointer_manager_v1` / `zwp_virtual_keyboard_manager_v1` | Input injection  |
+
+The `--quiet` flag suppresses warnings about unknown interface names
+(useful when listing interfaces that require specific compositor support).
+
+## Acknowledgements
+
+This project is a fork of [andrewbaxter/filterway](https://github.com/andrewbaxter/filterway/),
+licensed under ISC.
 
 I'm grateful to Andrew Baxter for the original implementation and inspiration.
 The original project appears to be inactive,
