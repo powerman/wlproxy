@@ -106,6 +106,12 @@ fn validate_interfaces(block: &[String], quiet: bool) {
     }
 }
 
+fn drop_fds(fds: &mut Vec<RawFd>) {
+    for fd in fds.drain(..) {
+        drop(unsafe { OwnedFd::from_raw_fd(fd) });
+    }
+}
+
 struct AncillaryReader<'a> {
     reader: &'a UnixStream,
     fds: &'a mut Vec<RawFd>,
@@ -336,9 +342,7 @@ fn handle_client_to_server(
         };
 
         if should_block {
-            for fd in ancillary_accum.drain(..) {
-                drop(unsafe { OwnedFd::from_raw_fd(fd) });
-            }
+            drop_fds(&mut ancillary_accum);
             continue;
         }
 
@@ -347,9 +351,7 @@ fn handle_client_to_server(
             &packet,
         )
         .context("Error writing message")?;
-        for fd in ancillary_accum.drain(..) {
-            drop(unsafe { OwnedFd::from_raw_fd(fd) });
-        }
+        drop_fds(&mut ancillary_accum);
     }
     Ok(())
 }
@@ -414,9 +416,7 @@ fn handle_server_to_client(
                         if args.debug {
                             eprintln!("Blocked global: {}", name);
                         }
-                        for fd in ancillary_accum.drain(..) {
-                            drop(unsafe { OwnedFd::from_raw_fd(fd) });
-                        }
+                        drop_fds(&mut ancillary_accum);
                         continue;
                     }
                 }
@@ -428,9 +428,7 @@ fn handle_server_to_client(
             &packet,
         )
         .context("Error writing message")?;
-        for fd in ancillary_accum.drain(..) {
-            drop(unsafe { OwnedFd::from_raw_fd(fd) });
-        }
+        drop_fds(&mut ancillary_accum);
     }
     Ok(())
 }

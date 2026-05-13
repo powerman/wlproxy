@@ -9,12 +9,12 @@
 
 ## Phase 2: Add missing tests
 
-- [ ] 5. Add test: FD forwarding client→server
-- [ ] 6. Add test: multiple concurrent connections
-- [ ] 7. Add test: block + prefix title combined
-- [ ] 8. Add test: validate_interfaces unknown name warning
-- [ ] 9. Add test: empty app_id/title replacement
-- [ ] 10. Add test: block with FD in bind request (client→server)
+- [x] 5. Add test: FD forwarding client→server
+- [x] 6. Add test: multiple concurrent connections
+- [x] 7. Add test: block + prefix title combined
+- [x] 8. Add test: validate_interfaces unknown name warning
+- [x] 9. Add test: empty app_id/title replacement
+- [x] 10. Add test: block with FD in bind request (client→server)
 
 ## Phase 3: Best practices improvements
 
