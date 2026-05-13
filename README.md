@@ -57,13 +57,13 @@ Arguments:
   <DOWNSTREAM>  Full path for the new Wayland socket
 
 Options:
-      --upstream <UPSTREAM>  Full path to compositor Wayland socket
-      --app-id <APP_ID>      Force all xdg toplevels to have the same app id
-      --prefix-app-id        Prefix the app id instead of replacing
-      --title <TITLE>        Force all xdg toplevels to have the same title
-      --prefix-title         Prefix the title instead of replacing
-      --block <BLOCK>        Wayland interfaces to block (can be specified multiple times)
-      --quiet                Suppress warnings about unknown interface names
+  -u, --upstream <UPSTREAM>  Full path to compositor Wayland socket
+  -a, --app-id <APP_ID>      Force all xdg toplevels to have the same app id
+  -A, --prefix-app-id        Prefix the app id instead of replacing
+  -t, --title <TITLE>        Force all xdg toplevels to have the same title
+  -T, --prefix-title         Prefix the title instead of replacing
+  -b, --block <BLOCK>        Wayland interfaces to block (can be specified multiple times)
+  -q, --quiet                Suppress warnings about unknown interface names
       --debug                Print debug messages
   -h, --help                 Print help
 ```

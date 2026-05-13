@@ -32,25 +32,25 @@ fn default_upstream() -> PathBuf {
 #[command(name = "wlproxy")]
 struct Args {
     /// Full path to compositor Wayland socket.
-    #[arg(long = "upstream")]
+    #[arg(short = 'u', long = "upstream")]
     upstream: Option<PathBuf>,
     /// Force all xdg toplevels to have the same app id
-    #[arg(long = "app-id")]
+    #[arg(short = 'a', long = "app-id")]
     app_id: Option<String>,
     /// Prefix the app id instead of replacing
-    #[arg(long = "prefix-app-id")]
+    #[arg(short = 'A', long = "prefix-app-id")]
     prefix_app_id: bool,
     /// Force all xdg toplevels to have the same title
-    #[arg(long = "title")]
+    #[arg(short = 't', long = "title")]
     title: Option<String>,
     /// Prefix the title instead of replacing
-    #[arg(long = "prefix-title")]
+    #[arg(short = 'T', long = "prefix-title")]
     prefix_title: bool,
     /// Wayland interfaces to block (can be specified multiple times)
-    #[arg(long = "block", value_delimiter = ',')]
+    #[arg(short = 'b', long = "block", value_delimiter = ',')]
     block: Vec<String>,
     /// Suppress warnings about unknown interface names
-    #[arg(long = "quiet")]
+    #[arg(short = 'q', long = "quiet")]
     quiet: bool,
     /// Print debug messages
     #[arg(long = "debug")]
