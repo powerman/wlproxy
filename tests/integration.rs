@@ -824,3 +824,640 @@ fn filterway_fd_forwarding_server_to_client() {
 
     cleanup_filterway(filterway);
 }
+
+// ---------------------------------------------------------------------------
+// Interface blocking
+// ---------------------------------------------------------------------------
+
+#[test]
+fn filterway_block_interfaces() {
+    let dir = tempdir().unwrap();
+    let mock_listener =
+        std::os::unix::net::UnixListener::bind(dir.path().join("upstream.sock")).unwrap();
+
+    let (filterway, mut compositor, mut client) = spawn_filterway(
+        &[
+            "--block",
+            "zwlr_layer_shell_v1,ext_data_control_manager_v1,zwlr_screencopy_manager_v1",
+        ],
+        dir.path(),
+        &mock_listener,
+    );
+
+    // Helper to send a global event from the compositor.
+    let send_global = |compositor: &mut UnixStream, type_id: u32, name: &str, version: u32| {
+        let mut body = vec![];
+        proto::write_arg_uint(&mut body, type_id).unwrap();
+        proto::write_arg_string(&mut body, name).unwrap();
+        proto::write_arg_uint(&mut body, version).unwrap();
+        write_packet(
+            compositor,
+            &Packet {
+                id: 2,
+                opcode: 0,
+                body,
+            },
+        )
+        .unwrap();
+    };
+
+    // 1. Create registry via get_registry (opcode=1, id 1 → registry at id 2).
+    {
+        let mut body = vec![];
+        proto::write_arg_uint(&mut body, 2).unwrap();
+        write_packet(
+            &mut client,
+            &Packet {
+                id: 1,
+                opcode: 1,
+                body,
+            },
+        )
+        .unwrap();
+    }
+    // Drain from compositor side.
+    let _ = read_packet(&mut compositor).unwrap().unwrap();
+
+    // 2. Compositor sends globals: some for blocked interfaces, some not.
+    send_global(&mut compositor, 0, "wl_compositor", 4);
+    send_global(&mut compositor, 1, "zwlr_layer_shell_v1", 5); // BLOCKED
+    send_global(&mut compositor, 2, "xdg_wm_base", 6);
+    send_global(&mut compositor, 3, "ext_data_control_manager_v1", 1); // BLOCKED
+    send_global(&mut compositor, 4, "wl_shm", 1);
+    send_global(&mut compositor, 5, "zwlr_screencopy_manager_v1", 3); // BLOCKED
+
+    // 3. Sentinel: a non-global packet to mark the end.
+    {
+        let mut body = vec![];
+        proto::write_arg_uint(&mut body, 999).unwrap();
+        write_packet(
+            &mut compositor,
+            &Packet {
+                id: 1,
+                opcode: 1,
+                body,
+            },
+        )
+        .unwrap();
+    }
+
+    // 4. Client reads globals — should see only wl_compositor, xdg_wm_base, wl_shm.
+    //    Each read confirms the blocked interfaces were silently dropped in between.
+    for &expected in &["wl_compositor", "xdg_wm_base", "wl_shm"] {
+        let p = read_packet(&mut client).unwrap().unwrap();
+        assert_eq!(p.id, 2, "expected global on registry (id 2)");
+        assert_eq!(p.opcode, 0, "expected global event (opcode 0)");
+        let mut cursor = std::io::Cursor::new(&p.body);
+        let _type_id = proto::read_arg_uint(&mut cursor).unwrap();
+        let name = proto::read_arg_string(&mut cursor).unwrap();
+        assert_eq!(
+            name.as_deref(),
+            Some(expected),
+            "unexpected global: got {name:?}, expected {expected}"
+        );
+    }
+
+    // 5. Next packet should be the sentinel, NOT a global for a blocked interface.
+    let sentinel = read_packet(&mut client).unwrap().unwrap();
+    assert_eq!(
+        sentinel,
+        Packet {
+            id: 1,
+            opcode: 1,
+            body: {
+                let mut b = vec![];
+                proto::write_arg_uint(&mut b, 999).unwrap();
+                b
+            },
+        },
+        "expected sentinel after allowed interfaces"
+    );
+
+    cleanup_filterway(filterway);
+}
+
+#[test]
+fn filterway_block_interfaces_app_id_still_works() {
+    let dir = tempdir().unwrap();
+    let mock_listener =
+        std::os::unix::net::UnixListener::bind(dir.path().join("upstream.sock")).unwrap();
+
+    // Block unrelated interfaces; app_id replacement should still work.
+    let (filterway, mut compositor, mut client) = spawn_filterway(
+        &[
+            "--app-id",
+            "filtered",
+            "--block",
+            "zwlr_layer_shell_v1,ext_data_control_manager_v1",
+        ],
+        dir.path(),
+        &mock_listener,
+    );
+
+    build_object_chain(&mut client, &mut compositor);
+
+    // Send set_app_id and verify it's replaced.
+    {
+        let mut body = vec![];
+        proto::write_arg_string(&mut body, "my-app").unwrap();
+        write_packet(
+            &mut client,
+            &Packet {
+                id: 5,
+                opcode: 3,
+                body,
+            },
+        )
+        .unwrap();
+    }
+    let modified = read_packet(&mut compositor).unwrap().unwrap();
+    let mut cursor = std::io::Cursor::new(&modified.body[..]);
+    let replaced = proto::read_arg_string(&mut cursor).unwrap();
+    assert_eq!(
+        replaced.as_deref(),
+        Some("filtered"),
+        "app_id replacement should work alongside interface blocking: got {replaced:?}"
+    );
+
+    cleanup_filterway(filterway);
+}
+
+#[test]
+fn filterway_block_interfaces_does_not_leak_fds() {
+    use std::os::unix::io::AsRawFd;
+    use uds::UnixStreamExt;
+
+    let dir = tempdir().unwrap();
+    let mock_listener =
+        std::os::unix::net::UnixListener::bind(dir.path().join("upstream.sock")).unwrap();
+
+    let (filterway, mut compositor, mut client) = spawn_filterway(
+        &["--block", "zwlr_layer_shell_v1"],
+        dir.path(),
+        &mock_listener,
+    );
+
+    // 1. Create registry.
+    {
+        let mut body = vec![];
+        proto::write_arg_uint(&mut body, 2).unwrap();
+        write_packet(
+            &mut client,
+            &Packet {
+                id: 1,
+                opcode: 1,
+                body,
+            },
+        )
+        .unwrap();
+    }
+    let _ = read_packet(&mut compositor).unwrap().unwrap();
+
+    // 2. Send a global for a blocked interface with an FD attached.
+    let mut global_body = vec![];
+    proto::write_arg_uint(&mut global_body, 0).unwrap();
+    proto::write_arg_string(&mut global_body, "zwlr_layer_shell_v1").unwrap();
+    proto::write_arg_uint(&mut global_body, 5).unwrap();
+    let mut packet_bytes = vec![];
+    write_packet(
+        &mut packet_bytes,
+        &Packet {
+            id: 2,
+            opcode: 0,
+            body: global_body,
+        },
+    )
+    .unwrap();
+
+    let (dummy_send, dummy_recv) = std::os::unix::net::UnixStream::pair().unwrap();
+    let send_fd = dummy_send.as_raw_fd();
+    compositor.send_fds(&packet_bytes, &[send_fd]).unwrap();
+    drop(dummy_send);
+
+    // 3. Send a global for a non-blocked interface (to verify fd consumption didn't break forwarding).
+    {
+        let mut body = vec![];
+        proto::write_arg_uint(&mut body, 1).unwrap();
+        proto::write_arg_string(&mut body, "wl_compositor").unwrap();
+        proto::write_arg_uint(&mut body, 4).unwrap();
+        write_packet(
+            &mut compositor,
+            &Packet {
+                id: 2,
+                opcode: 0,
+                body,
+            },
+        )
+        .unwrap();
+    }
+
+    // 4. Send a sentinel to mark the end.
+    {
+        let mut body = vec![];
+        proto::write_arg_uint(&mut body, 999).unwrap();
+        write_packet(
+            &mut compositor,
+            &Packet {
+                id: 1,
+                opcode: 1,
+                body,
+            },
+        )
+        .unwrap();
+    }
+
+    // 5. Client reads — should see wl_compositor (blocked interface's FD was dropped).
+    let p = read_packet(&mut client).unwrap().unwrap();
+    assert_eq!(p.id, 2);
+    assert_eq!(p.opcode, 0);
+    let mut cursor = std::io::Cursor::new(&p.body);
+    let _type_id = proto::read_arg_uint(&mut cursor).unwrap();
+    let name = proto::read_arg_string(&mut cursor).unwrap();
+    assert_eq!(name.as_deref(), Some("wl_compositor"));
+
+    // 6. Verify sentinel (confirms no extra packets leaked past the blocked one).
+    let sentinel = read_packet(&mut client).unwrap().unwrap();
+    assert_eq!(sentinel.id, 1);
+    assert_eq!(sentinel.opcode, 1);
+    let mut cursor = std::io::Cursor::new(&sentinel.body);
+    assert_eq!(proto::read_arg_uint(&mut cursor).unwrap(), 999);
+
+    drop(dummy_recv);
+    cleanup_filterway(filterway);
+}
+
+#[test]
+fn filterway_block_interfaces_blocks_bind_requests() {
+    let dir = tempdir().unwrap();
+    let mock_listener =
+        std::os::unix::net::UnixListener::bind(dir.path().join("upstream.sock")).unwrap();
+
+    let (filterway, mut compositor, mut client) = spawn_filterway(
+        &["--block", "zwlr_layer_shell_v1"],
+        dir.path(),
+        &mock_listener,
+    );
+
+    // 1. Create registry via get_registry (opcode=1, id 1 → registry at id 2).
+    {
+        let mut body = vec![];
+        proto::write_arg_uint(&mut body, 2).unwrap();
+        write_packet(
+            &mut client,
+            &Packet {
+                id: 1,
+                opcode: 1,
+                body,
+            },
+        )
+        .unwrap();
+    }
+    // Drain on compositor side.
+    let _ = read_packet(&mut compositor).unwrap().unwrap();
+
+    // 2. Compositor announces globals: xdg_wm_base (allowed) and zwlr_layer_shell_v1 (blocked).
+    {
+        let mut body = vec![];
+        proto::write_arg_uint(&mut body, 0).unwrap();
+        proto::write_arg_string(&mut body, "xdg_wm_base").unwrap();
+        proto::write_arg_uint(&mut body, 6).unwrap();
+        write_packet(
+            &mut compositor,
+            &Packet {
+                id: 2,
+                opcode: 0,
+                body,
+            },
+        )
+        .unwrap();
+    }
+    {
+        let mut body = vec![];
+        proto::write_arg_uint(&mut body, 1).unwrap();
+        proto::write_arg_string(&mut body, "zwlr_layer_shell_v1").unwrap();
+        proto::write_arg_uint(&mut body, 5).unwrap();
+        write_packet(
+            &mut compositor,
+            &Packet {
+                id: 2,
+                opcode: 0,
+                body,
+            },
+        )
+        .unwrap();
+    }
+    // Drain client-side globals (second is blocked, so only 1 arrives).
+    let global = read_packet(&mut client).unwrap().unwrap();
+    assert_eq!(global.id, 2);
+    assert_eq!(global.opcode, 0);
+    let mut cursor = std::io::Cursor::new(&global.body);
+    let _tid = proto::read_arg_uint(&mut cursor).unwrap();
+    let name = proto::read_arg_string(&mut cursor).unwrap();
+    assert_eq!(
+        name.as_deref(),
+        Some("xdg_wm_base"),
+        "only xdg_wm_base interface should reach client"
+    );
+
+    // 3. Client tries to bind zwlr_layer_shell_v1 (bypass attempt).
+    //    The bind includes the interface name — filterway should intercept it.
+    let blocked_obj_id = 3u32;
+    {
+        let mut body = vec![];
+        proto::write_arg_uint(&mut body, 1).unwrap();
+        proto::write_arg_string(&mut body, "zwlr_layer_shell_v1").unwrap();
+        proto::write_arg_uint(&mut body, 5).unwrap();
+        proto::write_arg_uint(&mut body, blocked_obj_id).unwrap();
+        write_packet(
+            &mut client,
+            &Packet {
+                id: 2,
+                opcode: 0,
+                body,
+            },
+        )
+        .unwrap();
+    }
+
+    // 4. Client also sends a legitimate bind for xdg_wm_base (should pass through).
+    {
+        let mut body = vec![];
+        proto::write_arg_uint(&mut body, 0).unwrap();
+        proto::write_arg_string(&mut body, "xdg_wm_base").unwrap();
+        proto::write_arg_uint(&mut body, 6).unwrap();
+        proto::write_arg_uint(&mut body, 4).unwrap();
+        write_packet(
+            &mut client,
+            &Packet {
+                id: 2,
+                opcode: 0,
+                body,
+            },
+        )
+        .unwrap();
+    }
+
+    // 5. Send sentinel from compositor to verify client is still alive.
+    {
+        let mut body = vec![];
+        proto::write_arg_uint(&mut body, 999).unwrap();
+        write_packet(
+            &mut compositor,
+            &Packet {
+                id: 1,
+                opcode: 1,
+                body,
+            },
+        )
+        .unwrap();
+    }
+
+    // 6. Compositor should receive: get_registry, xdg_wm_base bind (NOT zwlr_layer_shell_v1 bind).
+    // Wait — we already drained get_registry in step 1. So compositor's next read should be
+    // the xdg_wm_base bind (the zwlr_layer_shell_v1 bind was dropped by filterway).
+    let compositor_received = read_packet(&mut compositor).unwrap().unwrap();
+    assert_eq!(
+        compositor_received.id, 2,
+        "compositor should receive bind on registry"
+    );
+    assert_eq!(
+        compositor_received.opcode, 0,
+        "compositor should receive bind opcode"
+    );
+    let mut cursor = std::io::Cursor::new(&compositor_received.body);
+    let _type_id = proto::read_arg_uint(&mut cursor).unwrap();
+    let iface = proto::read_arg_string(&mut cursor).unwrap();
+    assert_eq!(
+        iface.as_deref(),
+        Some("xdg_wm_base"),
+        "only xdg_wm_base bind should reach compositor, got {:?}",
+        iface
+    );
+
+    // 7. Client should receive the sentinel (confirming filterway still works normally).
+    let sentinel = read_packet(&mut client).unwrap().unwrap();
+    assert_eq!(sentinel.id, 1);
+    assert_eq!(sentinel.opcode, 1);
+
+    // 8. Verify client→compositor still works for normal messages after blocked bind.
+    //    Build object chain on xdg_wm_base to confirm app_id replacement works.
+    {
+        // XdgWmBase.get_xdg_surface (opcode=2, id 4) → surface at id 5.
+        let mut body = vec![];
+        proto::write_arg_uint(&mut body, 5).unwrap();
+        write_packet(
+            &mut client,
+            &Packet {
+                id: 4,
+                opcode: 2,
+                body,
+            },
+        )
+        .unwrap();
+    }
+    let _ = read_packet(&mut compositor).unwrap().unwrap();
+
+    {
+        // XdgSurface.create_toplevel (opcode=1, id 5) → toplevel at id 6.
+        let mut body = vec![];
+        proto::write_arg_uint(&mut body, 6).unwrap();
+        write_packet(
+            &mut client,
+            &Packet {
+                id: 5,
+                opcode: 1,
+                body,
+            },
+        )
+        .unwrap();
+    }
+    let _ = read_packet(&mut compositor).unwrap().unwrap();
+
+    cleanup_filterway(filterway);
+}
+
+#[test]
+fn filterway_block_interfaces_drops_messages_to_blocked_object() {
+    let dir = tempdir().unwrap();
+    let mock_listener =
+        std::os::unix::net::UnixListener::bind(dir.path().join("upstream.sock")).unwrap();
+
+    let (filterway, mut compositor, mut client) = spawn_filterway(
+        &["--block", "zwlr_layer_shell_v1"],
+        dir.path(),
+        &mock_listener,
+    );
+
+    // 1. Create registry.
+    {
+        let mut body = vec![];
+        proto::write_arg_uint(&mut body, 2).unwrap();
+        write_packet(
+            &mut client,
+            &Packet {
+                id: 1,
+                opcode: 1,
+                body,
+            },
+        )
+        .unwrap();
+    }
+    let _ = read_packet(&mut compositor).unwrap().unwrap();
+
+    // 2. Client sends bind for zwlr_layer_shell_v1 — blocked by filterway.
+    //    (No globals announced — the malicious client is guessing type_id.)
+    let blocked_obj_id = 3u32;
+    {
+        let mut body = vec![];
+        proto::write_arg_uint(&mut body, 1).unwrap();
+        proto::write_arg_string(&mut body, "zwlr_layer_shell_v1").unwrap();
+        proto::write_arg_uint(&mut body, 5).unwrap();
+        proto::write_arg_uint(&mut body, blocked_obj_id).unwrap();
+        write_packet(
+            &mut client,
+            &Packet {
+                id: 2,
+                opcode: 0,
+                body,
+            },
+        )
+        .unwrap();
+    }
+
+    // 4. Client sends a message to the blocked object (e.g. a get_layer_surface request).
+    //    This should also be dropped by filterway.
+    {
+        // zwlr_layer_shell_v1.get_layer_surface (opcode 0 for example).
+        let mut body = vec![];
+        proto::write_arg_uint(&mut body, 10).unwrap();
+        write_packet(
+            &mut client,
+            &Packet {
+                id: blocked_obj_id,
+                opcode: 0,
+                body,
+            },
+        )
+        .unwrap();
+    }
+
+    // 5. Also verify that a normal packet to display still works.
+    //    Client sends a non-blocked message (Display.get_registry creates another registry
+    //    at a different id — just sending any valid-looking packet to id 1, opcode 0).
+    {
+        write_packet(
+            &mut client,
+            &Packet {
+                id: 1,
+                opcode: 0,
+                body: vec![0; 4],
+            },
+        )
+        .unwrap();
+    }
+
+    // 6. Compositor should NOT see the blocked bind or the message to blocked object.
+    //    Compositor should only see the Display opcode 0 message.
+    let received = read_packet(&mut compositor).unwrap().unwrap();
+    assert_eq!(
+        received.id, 1,
+        "only display message should reach compositor"
+    );
+    assert_eq!(received.opcode, 0);
+
+    cleanup_filterway(filterway);
+}
+
+#[test]
+fn filterway_block_multiple_flags() {
+    let dir = tempdir().unwrap();
+    let mock_listener =
+        std::os::unix::net::UnixListener::bind(dir.path().join("upstream.sock")).unwrap();
+
+    // Pass --block twice with different values.
+    let (filterway, mut compositor, mut client) = spawn_filterway(
+        &[
+            "--block",
+            "zwlr_layer_shell_v1",
+            "--block",
+            "ext_data_control_manager_v1",
+        ],
+        dir.path(),
+        &mock_listener,
+    );
+
+    // 1. Create registry.
+    {
+        let mut body = vec![];
+        proto::write_arg_uint(&mut body, 2).unwrap();
+        write_packet(
+            &mut client,
+            &Packet {
+                id: 1,
+                opcode: 1,
+                body,
+            },
+        )
+        .unwrap();
+    }
+    let _ = read_packet(&mut compositor).unwrap().unwrap();
+
+    // 2. Compositor sends globals.
+    let send_global = |compositor: &mut UnixStream, type_id: u32, name: &str, version: u32| {
+        let mut body = vec![];
+        proto::write_arg_uint(&mut body, type_id).unwrap();
+        proto::write_arg_string(&mut body, name).unwrap();
+        proto::write_arg_uint(&mut body, version).unwrap();
+        write_packet(
+            compositor,
+            &Packet {
+                id: 2,
+                opcode: 0,
+                body,
+            },
+        )
+        .unwrap();
+    };
+
+    send_global(&mut compositor, 0, "wl_compositor", 4);
+    send_global(&mut compositor, 1, "zwlr_layer_shell_v1", 5); // BLOCKED
+    send_global(&mut compositor, 2, "ext_data_control_manager_v1", 1); // BLOCKED
+    send_global(&mut compositor, 3, "xdg_wm_base", 6);
+
+    // 3. Sentinel.
+    {
+        let mut body = vec![];
+        proto::write_arg_uint(&mut body, 999).unwrap();
+        write_packet(
+            &mut compositor,
+            &Packet {
+                id: 1,
+                opcode: 1,
+                body,
+            },
+        )
+        .unwrap();
+    }
+
+    // 4. Client should see only wl_compositor and xdg_wm_base.
+    for &expected in &["wl_compositor", "xdg_wm_base"] {
+        let p = read_packet(&mut client).unwrap().unwrap();
+        assert_eq!(p.id, 2);
+        assert_eq!(p.opcode, 0);
+        let mut cursor = std::io::Cursor::new(&p.body);
+        let _type_id = proto::read_arg_uint(&mut cursor).unwrap();
+        let name = proto::read_arg_string(&mut cursor).unwrap();
+        assert_eq!(
+            name.as_deref(),
+            Some(expected),
+            "unexpected global: got {name:?}, expected {expected}"
+        );
+    }
+
+    // 5. Sentinel.
+    let sentinel = read_packet(&mut client).unwrap().unwrap();
+    assert_eq!(sentinel.id, 1);
+    assert_eq!(sentinel.opcode, 1);
+
+    cleanup_filterway(filterway);
+}

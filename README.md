@@ -22,6 +22,14 @@ Current filters:
   this can help writing compositor rules targeting programs running on a filterway instance.
 - Replace or prefix `title` - this may be helpful if nesting compositors,
   since compositors don't expect their title to be used and don't set useful titles.
+- Block specific Wayland interfaces by name -
+  prevents the client from binding to any of the listed interfaces.
+  Blocked global events are silently dropped before reaching the client,
+  and the client's bind requests for these interfaces are intercepted.
+  This can be used to restrict access to capabilities like
+  screenshots (`zwlr_screencopy_manager_v1`),
+  clipboard (`ext_data_control_manager_v1`, `zwlr_data_control_device_v1`),
+  layer shell (`zwlr_layer_shell_v1`), and others.
 
 # How to use it
 
