@@ -1390,6 +1390,39 @@ fn wlproxy_block_interfaces_and_title_prefix() {
 }
 
 #[test]
+fn wlproxy_unknown_interface_warning() {
+    let dir = tempdir().unwrap();
+    let upstream = dir.path().join("upstream.sock");
+    let downstream = dir.path().join("downstream.sock");
+
+    // Start wlproxy with an unknown interface (not in known_protocols.txt).
+    let mut wlproxy = Command::new(wlproxy_binary())
+        .args([
+            "--upstream",
+            upstream.to_str().unwrap(),
+            downstream.to_str().unwrap(),
+            "--block",
+            "UnknownInterface",
+        ])
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .expect("failed to start wlproxy");
+
+    // Give wlproxy time to print warnings (eprintln! flushes on newline
+    // even when piped in Rust's stdio implementation), then kill it.
+    std::thread::sleep(Duration::from_millis(500));
+    wlproxy.kill().unwrap();
+    let output = wlproxy.wait_with_output().unwrap();
+
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("unknown Wayland interface"),
+        "expected warning about unknown interface in stderr, got: {stderr}"
+    );
+}
+
+#[test]
 fn wlproxy_block_interfaces_blocks_bind_requests() {
     let dir = tempdir().unwrap();
     let mock_listener =
