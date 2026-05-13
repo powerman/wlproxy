@@ -124,3 +124,18 @@ jobs:
           draft: false
           prerelease: ${{ needs.release-pr.outputs.prerelease }}
           make_latest: ${{ needs.release-pr.outputs.prerelease != 'true' }}
+
+  publish-crates-io:
+    needs: [release-pr, build-and-upload, finalize]
+    if: ${{ needs.release-pr.outputs.result == 'released' }}
+    permissions:
+      contents: read
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          ref: ${{ needs.release-pr.outputs.version }}
+      - name: Publish to crates.io
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
+        run: cargo publish
