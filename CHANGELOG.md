@@ -5,6 +5,15 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.2.1] - 2026-05-13
+
+### 🐛 Fixed
+
+- Add cargo-binstall metadata for pre-built binary URL by @powerman in [cb10a38]
+
+[0.2.1]: https://github.com/powerman/wlproxy/compare/v0.2.0..v0.2.1
+[cb10a38]: https://github.com/powerman/wlproxy/commit/cb10a38bf0952720221f21640b812d26db8de256
+
 ## [0.2.0] - 2026-05-13
 
 ### 🚀 Added
