@@ -40,7 +40,7 @@ jobs:
           - x86_64-apple-darwin
           - aarch64-apple-darwin
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
         with:
           token: ${{ env.GITHUB_TOKEN }}
           ref: ${{ needs.release-pr.outputs.version }}
@@ -134,7 +134,7 @@ jobs:
       contents: read
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
         with:
           ref: ${{ needs.release-pr.outputs.version }}
       - name: Publish to crates.io
