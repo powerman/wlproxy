@@ -61,21 +61,29 @@ run = '! git status --porcelain | tee /dev/stderr | grep -q .'
 description = 'Build release binary'
 run = 'cargo build --release'
 
+# A task with unchanged sources is skipped, so sources include configs of its tool
+# and mise.lock (versions of tools).
 [tasks.'fmt:markdown']
 description = 'Format markdown files'
-sources = ['**/*.md']
+sources = [
+    '**/*.md',
+    '.prettierrc.yml',
+    '.prettierignore',
+    '.editorconfig',
+    'mise.lock',
+]
 run = 'prettier --write "**/*.md"'
 
 # Taplo doesn't respect .gitignore.
 [tasks.'fmt:toml']
 description = 'Format TOML files'
-sources = ['**/*.toml']
+sources = ['**/*.toml', 'mise.lock']
 env.RUST_LOG = 'warn' # Hide INFO logs of taplo.
 run = "git ls-files -z -co --exclude-standard '*.toml' | xargs -0 -r taplo format"
 
 [tasks.'fmt:yaml']
 description = 'Format YAML files'
-sources = ['**/*.yml', '**/*.yaml']
+sources = ['**/*.yml', '**/*.yaml', 'mise.lock']
 run = "git ls-files -z -co --exclude-standard '*.yml' '*.yaml' | xargs -0 -r yamlfmt"
 
 [tasks.'fmt:rust']
@@ -89,20 +97,26 @@ run = 'actionlint'
 [tasks.'lint:markdown']
 description = 'Lint markdown files'
 wait_for = ['fmt:markdown']
-sources = ['**/*.md']
+sources = [
+    '**/*.md',
+    '.prettierrc.yml',
+    '.prettierignore',
+    '.editorconfig',
+    'mise.lock',
+]
 run = 'prettier --check "**/*.md"'
 
 [tasks.'lint:toml']
 description = 'Check TOML files formatting'
 wait_for = ['fmt:toml']
-sources = ['**/*.toml']
+sources = ['**/*.toml', 'mise.lock']
 env.RUST_LOG = 'warn' # Hide INFO logs of taplo.
 run = "git ls-files -z -co --exclude-standard '*.toml' | xargs -0 -r taplo format --check"
 
 [tasks.'lint:yaml']
 description = 'Check YAML files formatting'
 wait_for = ['fmt:yaml']
-sources = ['**/*.yml', '**/*.yaml']
+sources = ['**/*.yml', '**/*.yaml', 'mise.lock']
 run = "git ls-files -z -co --exclude-standard '*.yml' '*.yaml' | xargs -0 -r yamlfmt -lint"
 
 [tasks.'lint:rust']
