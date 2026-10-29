@@ -35,10 +35,9 @@ git-cliff = 'latest'
 gh = 'latest'
 
 
-[tasks.'changelog:skip-commit']
-description = 'Add commit hash to .cliffignore to exclude from CHANGELOG'
-usage = 'arg "<commit>" help="Git revision (e.g. HEAD or a1b2c4d)"'
-run = 'git rev-parse --verify "${usage_commit}" >> .cliffignore'
+[tasks.default]
+description = 'Run all formatters, linters and tests'
+depends = ['fmt', 'lint', 'test']
 
 [tasks.fmt]
 description = 'Format all files'
@@ -51,10 +50,6 @@ depends = ['lint:*']
 [tasks.test]
 description = 'Run all tests'
 depends = ['test:*']
-
-[tasks.default]
-description = 'Run all formatters, linters and tests'
-depends = ['fmt', 'lint', 'test']
 
 [tasks.ci]
 description = 'Run all CI tasks'
@@ -126,3 +121,8 @@ run = 'cargo llvm-cov --workspace'
 [tasks.'cover:rust:total']
 description = 'Output total Rust coverage percentage'
 run = "cargo llvm-cov report 2>/dev/null | awk '/^TOTAL/{print $10}'"
+
+[tasks.'changelog:skip-commit']
+description = 'Add commit hash to .cliffignore to exclude from CHANGELOG'
+usage = 'arg "<commit>" help="Git revision (e.g. HEAD or a1b2c4d)"'
+run = 'git rev-parse --verify "${usage_commit}" >> .cliffignore'
