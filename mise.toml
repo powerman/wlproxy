@@ -48,6 +48,7 @@ gh = 'latest'
 #
 # An alternative is `depends` with `wait_for` between readers and writers.
 # Avoid it or be careful: it's easy to make a mistake there and get a non-obvious race.
+
 [tasks.default]
 description = 'Run all formatters, linters and tests'
 run = [
