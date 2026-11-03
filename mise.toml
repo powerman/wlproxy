@@ -35,6 +35,10 @@ git-cliff = 'latest'
 gh = 'latest'
 
 
+[env]
+PNPM_CONFIG_VIRTUAL_STORE_TYPE = 'project' # Fix https://github.com/jdx/mise/discussions/15328.
+
+
 # Tasks which read files must not run in parallel with tasks which write them.
 # Tasks which combine them SHOULD set a safe order by groups of tasks in `run`:
 # groups run one after another, tasks of one group run in parallel.
