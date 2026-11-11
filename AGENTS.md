@@ -12,8 +12,6 @@ that use its downstream socket.
 - **`src/lib.rs`** — public types (enum `ObjType` for tracking Wayland objects).
 - **`src/proto.rs`** — reading/writing Wayland messages (8-byte header + body).
 - **`tests/integration.rs`** — integration tests with a compositor emulator.
-- **`build.rs`** — removed; FD forwarding via Unix sockets is now done
-  through the `uds` crate on stable Rust.
 
 ### Key components
 
