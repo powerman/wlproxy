@@ -9,7 +9,7 @@ npm.package_manager = 'pnpm' # Avoid .mise/locks/** sidecars required by default
 [tools]
 node = 'lts'
 pnpm = 'latest'
-rust = '1.95.0'
+rust = '1.100.0'
 
 #--- Format
 # Opinionated Code Formatter.
@@ -24,9 +24,9 @@ yamlfmt = 'latest'
 actionlint = 'latest'
 
 #--- Test
-"cargo:cargo-nextest" = "latest"
+'cargo:cargo-nextest' = 'latest'
 # Code coverage instrumentation.
-"cargo:cargo-llvm-cov" = "0.8.6"
+'cargo:cargo-llvm-cov' = '0.9.1'
 
 #--- Release
 # A highly customizable Changelog Generator that follows Conventional Commit specifications.
