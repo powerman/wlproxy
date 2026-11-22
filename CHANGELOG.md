@@ -5,11 +5,34 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.2.3] - 2026-11-22
+
+### 🔔 Changed
+
+- Order tasks in mise.toml like the template by @powerman in [f58b8e0]
+
+### 📚 Documentation
+
+- Extend blocked-interfaces example with input, hotkey and window-list protocols by @powerman in [b8dc0ee]
+
+### 📦️ Dependencies
+
+- **(deps)** Bump clap from 4.6.1 to 4.6.6 by @dependabot[bot] in [#30]
+- **(deps)** Bump libc from 0.2.186 to 0.2.189 by @dependabot[bot] in [#24]
+- **(deps)** Mise up by @powerman in [57937b8]
+
+[0.2.3]: https://github.com/powerman/wlproxy/compare/v0.2.2..v0.2.3
+[f58b8e0]: https://github.com/powerman/wlproxy/commit/f58b8e0a40e6078bb692123b60c97e6413a67f3e
+[b8dc0ee]: https://github.com/powerman/wlproxy/commit/b8dc0ee90e3cbc50deb95eded1114c5facb28448
+[#30]: https://github.com/powerman/wlproxy/pull/30
+[#24]: https://github.com/powerman/wlproxy/pull/24
+[57937b8]: https://github.com/powerman/wlproxy/commit/57937b8d5fcea7f2648d9941713debc7068d3504
+
 ## [0.2.2] - 2026-05-13
 
 ### 🚀 Added
 
-- Add x86_64-unknown-linux-musl to releases by @powerman in [a871d3b]
+- Add `x86_64-unknown-linux-musl` to releases by @powerman in [a871d3b]
 
 [0.2.2]: https://github.com/powerman/wlproxy/compare/v0.2.1..v0.2.2
 [a871d3b]: https://github.com/powerman/wlproxy/commit/a871d3b55054c37c1fa11a8c01fc23374bf91831
