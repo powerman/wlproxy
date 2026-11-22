@@ -1,5 +1,5 @@
-# jdx/mise-action installs only releases older than a day, so a newer one would fail CI.
-min_version = '2026.10.19'
+# jdx/mise-action installs only releases older than a week, so a newer one would fail CI.
+min_version = '2026.11.1'
 
 [settings]
 lockfile = true # DO NOT FORGET TO `touch mise.lock` if mise.lock does not exist!
@@ -33,10 +33,6 @@ actionlint = 'latest'
 git-cliff = 'latest'
 # GitHub's official command line tool.
 gh = 'latest'
-
-
-[env]
-PNPM_CONFIG_VIRTUAL_STORE_TYPE = 'project' # Fix https://github.com/jdx/mise/discussions/15328.
 
 
 # Tasks which read files must not run in parallel with tasks which write them.
