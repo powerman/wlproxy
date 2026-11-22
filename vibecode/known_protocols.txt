@@ -6,6 +6,12 @@ xx_cutouts_v1
 # experimental/xx-fractional-scale-v2
 xx_fractional_scale_manager_v2
 xx_fractional_scale_v2
+# experimental/xx-hotkey-v1
+xx_hotkey_manager_v1
+xx_hotkey_v1
+# experimental/xx-image-capture-color-management-v1
+xx_image_capture_color_manager_v1
+xx_image_capture_source_colors_v1
 # experimental/xx-input-method-v2
 xx_input_method_manager_v2
 xx_input_method_v1
