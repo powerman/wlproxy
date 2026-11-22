@@ -21,8 +21,8 @@ from pathlib import Path
 from typing import Dict, List, Optional, Set, Tuple
 from urllib.request import urlopen
 
-REPO_ROOT = Path(__file__).resolve().parent.parent
-PROTOCOLS_FILE = REPO_ROOT / "known_protocols.txt"
+CRATE_ROOT = Path(__file__).resolve().parent.parent
+PROTOCOLS_FILE = CRATE_ROOT / "known_protocols.txt"
 
 GITLAB_BASE = "https://gitlab.freedesktop.org"
 GITLAB_API = f"{GITLAB_BASE}/api/v4/projects"

@@ -7,11 +7,16 @@ that use its downstream socket.
 
 ### Source structure
 
-- **`src/main.rs`** — entry point, argument parsing, creating and listening on
+The root `Cargo.toml` is a virtual workspace which holds the release version;
+the `wlproxy` crate lives in `vibecode/`.
+
+- **`vibecode/src/main.rs`** — entry point, argument parsing, creating and listening on
   the downstream socket, accepting connections.
-- **`src/lib.rs`** — public types (enum `ObjType` for tracking Wayland objects).
-- **`src/proto.rs`** — reading/writing Wayland messages (8-byte header + body).
-- **`tests/integration.rs`** — integration tests with a compositor emulator.
+- **`vibecode/src/lib.rs`** — public types (enum `ObjType` for tracking Wayland objects).
+- **`vibecode/src/proto.rs`** — reading/writing Wayland messages (8-byte header + body).
+- **`vibecode/tests/integration.rs`** — integration tests with a compositor emulator.
+- **`vibecode/scripts/update_known_protocols.py`** — regenerates
+  `vibecode/known_protocols.txt` from upstream protocol repositories.
 
 ### Key components
 

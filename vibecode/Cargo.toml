@@ -1,0 +1,24 @@
+[package]
+name = "wlproxy"
+version.workspace = true
+edition = "2021"
+description = "Filter/modify Wayland messages from clients"
+readme = "../README.md"
+repository = "https://github.com/powerman/wlproxy"
+license = "MIT"
+
+[package.metadata.binstall]
+pkg-url = "{ repo }/releases/download/v{ version }/{ name }-{ target }"
+pkg-fmt = "bin"
+
+[dependencies]
+clap = { version = "4", features = ["derive"] }
+defer = "0.2"
+libc = "0.2"
+sd-notify = "0.5"
+uds = "0.4"
+rustix = { version = "1.1", features = ["fs"] }
+
+[dev-dependencies]
+tempfile = "3"
+uds = "0.4"
