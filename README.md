@@ -98,21 +98,30 @@ or compromise the user's session:
 
 ```sh
 wlproxy /run/user/1000/wayland-filtered \
+    --block ext_image_copy_capture_manager_v1 \
     --block zwlr_screencopy_manager_v1 \
     --block zkde_screencast_unstable_v1 \
     --block ext_data_control_manager_v1 \
     --block zwlr_data_control_manager_v1 \
     --block zwlr_virtual_pointer_manager_v1 \
-    --block zwp_virtual_keyboard_manager_v1
+    --block zwp_virtual_keyboard_manager_v1 \
+    --block zwp_input_method_manager_v2 \
+    --block xx_input_method_manager_v2 \
+    --block xx_hotkey_manager_v1 \
+    --block ext_foreign_toplevel_list_v1 \
+    --block zwlr_foreign_toplevel_manager_v1
 ```
 
 This blocks the following capabilities:
 
-| Interface                                                             | Risk             |
-| --------------------------------------------------------------------- | ---------------- |
-| `zwlr_screencopy_manager_v1` / `zkde_screencast_unstable_v1`          | Screen capture   |
-| `ext_data_control_manager_v1` / `zwlr_data_control_manager_v1`        | Clipboard access |
-| `zwlr_virtual_pointer_manager_v1` / `zwp_virtual_keyboard_manager_v1` | Input injection  |
+| Interface                                                                                          | Risk                                      |
+| -------------------------------------------------------------------------------------------------- | ----------------------------------------- |
+| `ext_image_copy_capture_manager_v1` / `zwlr_screencopy_manager_v1` / `zkde_screencast_unstable_v1` | Screen capture                            |
+| `ext_data_control_manager_v1` / `zwlr_data_control_manager_v1`                                     | Clipboard access                          |
+| `zwlr_virtual_pointer_manager_v1` / `zwp_virtual_keyboard_manager_v1`                              | Input injection                           |
+| `zwp_input_method_manager_v2` / `xx_input_method_manager_v2`                                       | Reading typed text                        |
+| `xx_hotkey_manager_v1`                                                                             | Global shortcut hijacking, focus stealing |
+| `ext_foreign_toplevel_list_v1` / `zwlr_foreign_toplevel_manager_v1`                                | Listing other windows and their titles    |
 
 The `--quiet` flag suppresses warnings about unknown interface names
 (useful when listing interfaces that require specific compositor support).
